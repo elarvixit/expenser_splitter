@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Halve — Split expenses</title>
+  <meta name="description" content="Split group expenses to the paisa. Balances are recalculated from every transaction.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23EA580C'/%3E%3Cpath d='M16 7a9 9 0 1 0 0 18z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#" aria-label="Halve home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Halve</span>
+      </a>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost" id="btn-demo" type="button">Load demo</button>
+        <button class="btn btn-soft" id="btn-pay" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12m-4-4 4 4-4 4"/></svg>
+          <span>Record payment</span>
+        </button>
+        <button class="btn btn-primary" id="btn-add" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>
+          <span>Add expense</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero" aria-labelledby="group-name">
+      <div class="hero-text">
+        <span class="eyebrow">Group</span>
+        <input id="group-name" class="group-name" maxlength="40" spellcheck="false" aria-label="Group name">
+        <p class="hero-sub" id="hero-sub"></p>
+      </div>
+      <dl class="stats" id="stats"></dl>
+    </section>
+
+    <div class="grid">
+      <div class="col">
+        <section class="card" aria-labelledby="h-bal">
+          <div class="card-head">
+            <div>
+              <h2 id="h-bal">Balances</h2>
+              <p class="card-sub">Recalculated from every expense and payment</p>
+            </div>
+            <div class="legend" aria-hidden="true">
+              <span><i class="dot dot-owe"></i>Owes</span>
+              <span><i class="dot dot-get"></i>Gets back</span>
+            </div>
+          </div>
+          <ul class="balance-list" id="balances"></ul>
+        </section>
+
+        <section class="card" aria-labelledby="h-settle">
+          <div class="card-head">
+            <div>
+              <h2 id="h-settle">Settle up</h2>
+              <p class="card-sub">The fewest payments that square everyone</p>
+            </div>
+          </div>
+          <ul class="transfer-list" id="transfers"></ul>
+        </section>
+
+        <section class="card" aria-labelledby="h-debts">
+          <details class="debts" id="debts-wrap">
+            <summary class="card-head">
+              <div>
+                <h2 id="h-debts">Who owes whom</h2>
+                <p class="card-sub">Direct debts between each pair, before simplifying</p>
+              </div>
+              <svg class="chev" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+            </summary>
+            <ul class="debt-list" id="debts"></ul>
+          </details>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card" aria-labelledby="h-members">
+          <div class="card-head">
+            <div>
+              <h2 id="h-members">Members</h2>
+              <p class="card-sub" id="members-sub"></p>
+            </div>
+          </div>
+          <ul class="member-list" id="members"></ul>
+          <form class="add-member" id="add-member" autocomplete="off">
+            <input id="member-name" placeholder="Add a person" maxlength="24" aria-label="New member name">
+            <button class="btn btn-soft btn-sm" type="submit">Add</button>
+          </form>
+        </section>
+
+        <section class="card" aria-labelledby="h-activity">
+          <div class="card-head">
+            <div>
+              <h2 id="h-activity">Activity</h2>
+              <p class="card-sub">Edit or delete anything — balances follow</p>
+            </div>
+          </div>
+          <ul class="activity" id="activity"></ul>
+        </section>
+      </div>
+    </div>
+
+    <footer class="foot">
+      Amounts are stored as whole paise. Nothing but your transactions is saved — balances are always recomputed.
+      <a href="tests/">Run the test suite →</a>
+    </footer>
+  </main>
+
+  <!-- Expense dialog -->
+  <dialog class="sheet" id="expense-dialog" aria-labelledby="expense-title">
+    <form method="dialog" id="expense-form" novalidate autocomplete="off">
+      <header class="sheet-head">
+        <h3 id="expense-title">Add expense</h3>
+        <button class="icon-btn" value="cancel" formnovalidate aria-label="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+
+      <div class="sheet-body">
+        <div class="amount-field">
+          <span class="currency">₹</span>
+          <input id="ex-amount" inputmode="decimal" placeholder="0.00" aria-label="Amount in rupees">
+        </div>
+
+        <label class="field">
+          <span>What was it for?</span>
+          <input id="ex-desc" placeholder="Dinner, cab, groceries…" maxlength="60">
+        </label>
+
+        <label class="field">
+          <span>Paid by</span>
+          <select id="ex-payer"></select>
+        </label>
+
+        <div class="field">
+          <span>Split</span>
+          <div class="segmented" role="radiogroup" aria-label="Split method">
+            <label><input type="radio" name="mode" value="equal" checked><span>Equally</span></label>
+            <label><input type="radio" name="mode" value="exact"><span>Exact amounts</span></label>
+            <label><input type="radio" name="mode" value="percent"><span>Percentages</span></label>
+          </div>
+        </div>
+
+        <ul class="split-rows" id="split-rows"></ul>
+        <div class="split-meter" id="split-meter"></div>
+        <p class="form-error" id="ex-error" role="alert"></p>
+      </div>
+
+      <footer class="sheet-foot">
+        <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" id="ex-save" value="save">Save expense</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Payment dialog -->
+  <dialog class="sheet sheet-sm" id="pay-dialog" aria-labelledby="pay-title">
+    <form method="dialog" id="pay-form" novalidate autocomplete="off">
+      <header class="sheet-head">
+        <h3 id="pay-title">Record a payment</h3>
+        <button class="icon-btn" value="cancel" formnovalidate aria-label="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+      <div class="sheet-body">
+        <div class="pay-route">
+          <label class="field"><span>From</span><select id="pay-from"></select></label>
+          <span class="pay-arrow" aria-hidden="true">
+            <svg viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4"/></svg>
+          </span>
+          <label class="field"><span>To</span><select id="pay-to"></select></label>
+        </div>
+        <div class="amount-field">
+          <span class="currency">₹</span>
+          <input id="pay-amount" inputmode="decimal" placeholder="0.00" aria-label="Amount in rupees">
+        </div>
+        <label class="field">
+          <span>Note <em>(optional)</em></span>
+          <input id="pay-note" placeholder="UPI, cash…" maxlength="40">
+        </label>
+        <p class="form-error" id="pay-error" role="alert"></p>
+      </div>
+      <footer class="sheet-foot">
+        <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" value="save">Record payment</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="src/balances.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
