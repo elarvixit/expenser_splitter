@@ -5,6 +5,9 @@ A static web app for splitting group expenses to the paisa. No build step, no de
 ```
 index.html, styles.css, app.js   UI (orange/white)
 src/balances.js                  pure balance engine (browser global + CommonJS)
+src/remote.js                    tiny Supabase client (calls the three database functions)
+config.js                        public Supabase URL + anon key (empty = local-only mode)
+supabase/schema.sql              database tables + functions; paste into the Supabase SQL Editor
 tests/balances.test.js           unit tests (browser or Node)
 tests/index.html                 browser test runner
 serve.ps1                        tiny local static server (PowerShell)
@@ -18,6 +21,29 @@ powershell -ExecutionPolicy Bypass -File serve.ps1
 
 Open http://localhost:5173 for the app and http://localhost:5173/tests/ for the tests.
 If Node is installed you can also run `node tests/balances.test.js`.
+
+## Supabase (sync and share by link)
+
+With `config.js` left empty, Splitter keeps data only in the browser. To sync across devices
+and share groups:
+
+1. In your Supabase project, open **SQL Editor → New query**, paste all of
+   `supabase/schema.sql` and click **Run**. It's safe to run again later.
+2. Copy the **Project URL** and the **anon / publishable key** from **Project Settings → API**
+   into `config.js`, then commit and push. Vercel redeploys automatically, and no Vercel
+   environment variables are needed.
+3. Open the site. Your existing groups upload automatically. **Share link** copies a URL like
+   `https://…/#g=<secret>`, and anyone who opens it can view and edit that group.
+
+How it stays safe with a public key: the tables have Row Level Security on with no policies, and
+the anon role has no table privileges. The browser can only call `create_group`, `get_group`
+and `save_group`, and each one needs the group's secret token. Never put the `service_role`
+key in `config.js`.
+
+Edits apply instantly on the device, then sync. `save_group` checks a version number. If
+someone else saved in between, the app fetches the latest copy, replays your unsaved changes on
+top of it and saves again. Other people's changes are picked up every 15 seconds and whenever you
+return to the tab. Removing a group from the Groups list only removes it from that device.
 
 ## Data model
 

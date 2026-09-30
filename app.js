@@ -20,13 +20,33 @@
   const STORE_KEY = 'splitter:v2';
   const LEGACY_KEY = 'halve:v1'; // single-group data from the first version
   const $ = (sel) => document.querySelector(sel);
+  // null when config.js has no Supabase settings → local-only mode
+  const remote = window.SplitterRemote ? window.SplitterRemote.createRemote(window.SPLITTER_CONFIG) : null;
 
   // ---------- state ----------
-  // store = { activeGroupId, groups: [{ id, groupName, members, expenses, settlements, createdAt }] }
+  // store = { activeGroupId, groups: [group] }
+  // group = { id, groupName, members, expenses, settlements, createdAt,
+  //           token     – secret share token once the group exists in Supabase (else null)
+  //           version   – server version this copy is based on
+  //           rev       – local change counter; synced when rev === syncedRev }
 
   function newGroup(name) {
-    return { id: uid('g'), groupName: name || 'New group', members: [], expenses: [], settlements: [], createdAt: new Date().toISOString() };
+    return {
+      id: uid('g'), groupName: name || 'New group', members: [], expenses: [], settlements: [],
+      createdAt: new Date().toISOString(), token: null, version: 0, rev: 0, syncedRev: 0,
+    };
   }
+
+  function normalizeGroup(g) {
+    g.token = g.token || null;
+    g.version = Number.isInteger(g.version) ? g.version : 0;
+    g.rev = Number.isInteger(g.rev) ? g.rev : 0;
+    g.syncedRev = Number.isInteger(g.syncedRev) ? g.syncedRev : g.rev;
+    delete g.loading;
+    return g;
+  }
+
+  const hasContent = (g) => g.members.length > 0 || g.expenses.length > 0 || g.settlements.length > 0;
 
   function isValidGroup(g) {
     try {
@@ -42,7 +62,7 @@
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         const s = JSON.parse(raw);
-        const groups = (s && Array.isArray(s.groups) ? s.groups : []).filter(isValidGroup);
+        const groups = (s && Array.isArray(s.groups) ? s.groups : []).filter(isValidGroup).map(normalizeGroup);
         if (groups.length) {
           const active = groups.some((g) => g.id === s.activeGroupId) ? s.activeGroupId : groups[0].id;
           return { activeGroupId: active, groups };
@@ -50,7 +70,7 @@
       }
       const legacy = localStorage.getItem(LEGACY_KEY);
       if (legacy) {
-        const g = Object.assign(newGroup(), JSON.parse(legacy));
+        const g = normalizeGroup(Object.assign(newGroup(), JSON.parse(legacy)));
         if (isValidGroup(g)) return { activeGroupId: g.id, groups: [g] };
       }
     } catch (_) { /* fall through to a fresh store */ }
@@ -72,10 +92,15 @@
     const next = JSON.parse(JSON.stringify(store.groups[i]));
     mutate(next);
     calculateBalances(next); // throws ValidationError if the change breaks the ledger
+    next.rev += 1;
     store.groups[i] = next;
     if (next.id === state.id) state = next;
     save();
     render();
+    if (remote) {
+      pendingOps(next.id).push({ rev: next.rev, mutate }); // kept so it can be replayed on a conflict
+      sync(next.id);
+    }
   }
 
   function switchGroup(id) {
@@ -85,6 +110,251 @@
     state = g;
     save();
     render();
+    updateHash();
+    pull(id);
+  }
+
+  const findGroup = (id) => store.groups.find((g) => g.id === id);
+
+  /** Replace a group object in the store (keeps `state` pointing at the active group). */
+  function putGroup(next) {
+    const i = store.groups.findIndex((g) => g.id === next.id);
+    if (i < 0) return;
+    store.groups[i] = next;
+    if (state.id === next.id) state = next;
+    save();
+  }
+
+  // ---------- Supabase sync ----------
+  // Every change is applied locally first, then pushed with save_group(token, version, group).
+  // If someone else saved in between, the server answers 'version_conflict': we fetch the
+  // latest copy, replay our not-yet-saved changes on top of it and try again.
+
+  const ops = new Map(); // groupId → [{ rev, mutate }] not yet confirmed by the server
+  const inflight = new Map(); // groupId → promise of the running sync (syncs are serialized)
+  let offline = false;
+
+  function pendingOps(id) {
+    if (!ops.has(id)) ops.set(id, []);
+    return ops.get(id);
+  }
+
+  const payloadOf = (g) => ({ groupName: g.groupName, members: g.members, expenses: g.expenses, settlements: g.settlements });
+
+  function fromServer(local, server) {
+    const next = Object.assign({}, local, {
+      groupName: server.groupName,
+      members: server.members,
+      expenses: server.expenses,
+      settlements: server.settlements,
+      version: server.version,
+    });
+    delete next.loading;
+    calculateBalances(next); // never accept a ledger the engine rejects
+    return next;
+  }
+
+  function sync(id, opts) {
+    if (!remote) return Promise.resolve();
+    const run = (inflight.get(id) || Promise.resolve())
+      .then(() => pushGroup(id, opts || {}))
+      .then(() => { offline = false; })
+      .catch((err) => {
+        offline = true;
+        console.warn('Splitter sync failed; will retry', err);
+      })
+      .finally(() => {
+        if (inflight.get(id) === run) inflight.delete(id);
+        renderSyncStatus();
+      });
+    inflight.set(id, run);
+    renderSyncStatus();
+    return run;
+  }
+
+  async function pushGroup(id, { force = false }) {
+    for (let guard = 0; guard < 8; guard++) {
+      let g = findGroup(id);
+      if (!g || g.loading) return;
+      if (!g.token) {
+        if (!force && !hasContent(g)) return; // don't create empty groups on the server
+        const token = await remote.createGroup(g.groupName);
+        g = findGroup(id);
+        if (!g) return;
+        putGroup(Object.assign({}, g, { token, version: 0, syncedRev: -1 })); // -1 → must save contents
+        if (id === state.id) updateHash();
+        continue;
+      }
+      if (g.rev === g.syncedRev) return;
+      const sentRev = g.rev;
+      try {
+        const version = await remote.saveGroup(g.token, g.version, payloadOf(g));
+        const latest = findGroup(id);
+        if (!latest) return;
+        putGroup(Object.assign({}, latest, { version, syncedRev: sentRev }));
+        ops.set(id, pendingOps(id).filter((op) => op.rev > sentRev));
+      } catch (err) {
+        if (/version_conflict/.test(err.message)) await rebase(id);
+        else if (err.status === 400 || err.status === 409) await discardRejected(id, err);
+        else throw err; // network / server trouble → retried later
+      }
+    }
+  }
+
+  /** The server refused our copy (e.g. a duplicate name added at the same time elsewhere). */
+  async function discardRejected(id, err) {
+    const g = findGroup(id);
+    const server = await remote.getGroup(g.token);
+    const latest = findGroup(id);
+    if (!latest) return;
+    if (!server) {
+      // The group vanished from the server: re-create it (with a new link) from this copy.
+      putGroup(Object.assign({}, latest, { token: null, version: 0, syncedRev: -1 }));
+      return;
+    }
+    ops.set(id, []);
+    putGroup(Object.assign(fromServer(latest, server), { rev: latest.rev, syncedRev: latest.rev }));
+    if (id === state.id) render();
+    const reason = /members_unique_name/.test(err.message) ? 'that name is already in the group' : 'it clashed with a newer edit';
+    toast(`Couldn't save your last change (${reason}). Showing the latest version.`);
+  }
+
+  /** Fetch the latest server copy and replay our unsaved changes on top of it. */
+  async function rebase(id) {
+    const g = findGroup(id);
+    const server = await remote.getGroup(g.token);
+    const latest = findGroup(id);
+    if (!server || !latest) return;
+    let next = fromServer(latest, server);
+    const kept = [];
+    let dropped = 0;
+    for (const op of pendingOps(id)) {
+      try {
+        const trial = JSON.parse(JSON.stringify(next));
+        op.mutate(trial);
+        calculateBalances(trial);
+        next = trial;
+        kept.push(op);
+      } catch (_) {
+        dropped++;
+      }
+    }
+    const lostOffline = latest.rev !== latest.syncedRev && pendingOps(id).length === 0;
+    ops.set(id, kept);
+    next.rev = latest.rev;
+    next.syncedRev = kept.length ? latest.rev - 1 : latest.rev;
+    putGroup(next);
+    if (id === state.id) render();
+    if (dropped || lostOffline) {
+      toast('Someone else changed this group at the same time — some of your edits could not be applied');
+    }
+  }
+
+  /** Refresh a group from the server if someone else changed it (skipped while we have unsaved edits). */
+  async function pull(id) {
+    if (!remote) return;
+    const g = findGroup(id);
+    if (!g || !g.token || inflight.has(id)) return;
+    if (g.rev !== g.syncedRev && !g.loading) return; // our own unsaved edits win until they're pushed
+    let server;
+    try {
+      server = await remote.getGroup(g.token);
+      offline = false;
+    } catch (err) {
+      offline = true;
+      renderSyncStatus();
+      return;
+    }
+    const latest = findGroup(id);
+    if (!latest || inflight.has(id)) return;
+    if (!server) {
+      if (latest.loading) {
+        removeGroupLocally(id);
+        toast('That group link is invalid or the group no longer exists');
+      }
+      return;
+    }
+    if (latest.rev !== latest.syncedRev) {
+      if (latest.loading) { await rebase(id); sync(id); } // edits made while the link was loading
+      return;
+    }
+    if (server.version === latest.version && !latest.loading) return renderSyncStatus();
+    putGroup(fromServer(latest, server));
+    if (id === state.id) render();
+  }
+
+  function removeGroupLocally(id) {
+    const index = store.groups.findIndex((g) => g.id === id);
+    if (index < 0) return;
+    store.groups.splice(index, 1);
+    ops.delete(id);
+    if (!store.groups.length) store.groups.push(newGroup('My group'));
+    if (state.id === id) switchGroup(store.groups[Math.min(index, store.groups.length - 1)].id);
+    else { save(); render(); }
+  }
+
+  const tokenFromHash = () => {
+    const m = /[#&]g=([0-9a-f-]{36})\b/i.exec(location.hash);
+    return m ? m[1].toLowerCase() : null;
+  };
+
+  function updateHash() {
+    if (!remote) return;
+    const url = state.token ? `#g=${state.token}` : location.pathname + location.search;
+    if (location.hash !== (state.token ? `#g=${state.token}` : '')) history.replaceState(null, '', url);
+  }
+
+  /** Open the group in the URL (#g=<token>), adding it to this device's list if it's new. */
+  function openFromLink() {
+    const token = tokenFromHash();
+    if (!remote || !token) return;
+    let g = store.groups.find((x) => x.token === token);
+    if (!g) {
+      g = Object.assign(newGroup('Loading group…'), { token, version: -1, loading: true });
+      // A first-time visitor's untouched starter group is just clutter next to the shared one.
+      store.groups = store.groups.filter((x) => x.token || x.rev > 0 || hasContent(x));
+      store.groups.push(g);
+    }
+    if (g.id !== state.id) switchGroup(g.id);
+    else pull(g.id);
+  }
+
+  const shareUrl = (g) => `${location.origin}${location.pathname}#g=${g.token}`;
+
+  async function shareGroup() {
+    const id = state.id;
+    if (!findGroup(id).token) {
+      toast('Creating a share link…');
+      await sync(id, { force: true });
+    }
+    const g = findGroup(id);
+    if (!g || !g.token) return toast('Could not create a link — check your connection and try again');
+    const url = shareUrl(g);
+    if (navigator.share && window.matchMedia('(pointer: coarse)').matches) {
+      try { await navigator.share({ title: `${g.groupName} · Splitter`, url }); return; } catch (_) { /* fall back to copy */ }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Link copied — anyone with it can view and edit this group');
+    } catch (_) {
+      window.prompt('Copy this link to share the group:', url);
+    }
+  }
+
+  function renderSyncStatus() {
+    const pill = $('#sync-status');
+    $('#btn-share').hidden = !remote;
+    pill.hidden = !remote;
+    if (!remote) return;
+    let cls = 'synced';
+    let text = 'Synced';
+    if (state.loading) [cls, text] = ['saving', 'Loading…'];
+    else if (inflight.has(state.id)) [cls, text] = ['saving', 'Saving…'];
+    else if (offline && (state.rev !== state.syncedRev || !state.token)) [cls, text] = ['offline', 'Offline — will retry'];
+    else if (!state.token) [cls, text] = ['local', 'Only on this device'];
+    else if (state.rev !== state.syncedRev) [cls, text] = ['saving', 'Waiting to save'];
+    pill.className = `sync-pill ${cls}`;
+    pill.textContent = text;
   }
 
   function uid(prefix) {
@@ -154,6 +424,7 @@
     renderMembers();
     renderActivity();
     renderGroupButton();
+    renderSyncStatus();
     $('#btn-add').disabled = state.members.length === 0;
     $('#btn-pay').disabled = state.members.length < 2;
   }
@@ -276,7 +547,7 @@
     const items = [
       ...state.expenses.map((e) => ({ kind: 'expense', at: e.createdAt, item: e })),
       ...state.settlements.map((s) => ({ kind: 'payment', at: s.createdAt, item: s })),
-    ].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    ].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
 
     const list = $('#activity');
     if (!items.length) {
@@ -676,13 +947,16 @@
       ],
       settlements: [{ id: uid('s'), from: ids.dev, to: ids.asha, amount: 300000, note: 'UPI', createdAt: day(24, 11) }],
     };
-    // The demo becomes its own group; it replaces the current group only if that one is still empty.
-    const group = Object.assign(newGroup(), demo);
-    calculateBalances(group);
-    const i = store.groups.indexOf(state);
-    if (!state.members.length && !state.expenses.length && !state.settlements.length) store.groups[i] = group;
-    else store.groups.push(group);
-    switchGroup(group.id);
+    // The demo becomes its own group; it fills the current group only if that one is still empty.
+    if (!hasContent(state) && !state.loading) {
+      commit((s) => Object.assign(s, demo));
+    } else {
+      const group = Object.assign(newGroup(), demo, { rev: 1 }); // rev 1 → not yet synced
+      calculateBalances(group);
+      store.groups.push(group);
+      switchGroup(group.id);
+      sync(group.id);
+    }
     toast('Demo trip added to your groups');
   }
 
@@ -759,7 +1033,9 @@
     const index = store.groups.findIndex((g) => g.id === id);
     if (index < 0) return;
     const removed = store.groups[index];
+    const removedOps = ops.get(id);
     store.groups.splice(index, 1);
+    ops.delete(id);
     let placeholder = null;
     if (!store.groups.length) {
       placeholder = newGroup('My group');
@@ -768,13 +1044,18 @@
     if (state.id === id) switchGroup(store.groups[Math.min(index, store.groups.length - 1)].id);
     else { save(); render(); }
     renderGroupList();
-    toast(`${removed.groupName} deleted`, {
+    const message = remote && removed.token
+      ? `${removed.groupName} removed from this device. Anyone with its link can still open it`
+      : `${removed.groupName} deleted`;
+    toast(message, {
       label: 'Undo',
       run: () => {
         const p = placeholder && store.groups.find((g) => g.id === placeholder.id);
         if (p && !p.members.length && !p.expenses.length && !p.settlements.length) store.groups.splice(store.groups.indexOf(p), 1);
         store.groups.splice(Math.min(index, store.groups.length), 0, removed);
+        if (removedOps) ops.set(removed.id, removedOps);
         switchGroup(removed.id);
+        sync(removed.id);
         if (groupsDialog.open) renderGroupList();
       },
     });
@@ -837,6 +1118,24 @@
   $('#btn-groups').addEventListener('click', openGroups);
   $('#btn-add').addEventListener('click', () => openExpense(null));
   $('#btn-pay').addEventListener('click', () => openPayment(null));
+  $('#btn-share').addEventListener('click', shareGroup);
 
   render();
+
+  if (remote) {
+    openFromLink();
+    updateHash();
+    // Upload local groups that aren't on the server yet, and anything left unsaved last time.
+    for (const g of store.groups) if (g.rev !== g.syncedRev || (!g.token && hasContent(g))) sync(g.id);
+    pull(state.id);
+    window.addEventListener('hashchange', openFromLink);
+    // Pick up other people's changes: poll the open group, retry failed saves.
+    const refresh = () => {
+      for (const g of store.groups) if (!inflight.has(g.id) && g.rev !== g.syncedRev) sync(g.id); // even in background
+      if (!document.hidden) pull(state.id);
+    };
+    setInterval(refresh, 15000);
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('online', refresh);
+  }
 })();

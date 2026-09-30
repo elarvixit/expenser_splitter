@@ -44,6 +44,13 @@
         <span class="eyebrow" id="hero-eyebrow">Group</span>
         <input id="group-name" class="group-name" maxlength="40" spellcheck="false" aria-label="Group name">
         <p class="hero-sub" id="hero-sub"></p>
+        <div class="hero-actions">
+          <button class="share-btn" id="btn-share" type="button" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 11.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1 1M11.5 8.5a3.5 3.5 0 0 0-5 0L4 11a3.5 3.5 0 0 0 5 5l1-1"/></svg>
+            <span>Share link</span>
+          </button>
+          <span class="sync-pill" id="sync-status" role="status" hidden></span>
+        </div>
       </div>
       <dl class="stats" id="stats"></dl>
     </section>
@@ -116,7 +123,7 @@
     </div>
 
     <footer class="foot">
-      Amounts are stored as whole paise. Nothing but your transactions is saved — balances are always recomputed.
+      Amounts are stored as whole paise. Only transactions are saved — balances are always recomputed.
       <a href="tests/">Run the test suite →</a>
     </footer>
   </main>
@@ -231,7 +238,9 @@
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
+  <script src="config.js"></script>
   <script src="src/balances.js"></script>
+  <script src="src/remote.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

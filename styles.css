@@ -135,6 +135,29 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .group-name:focus { outline: none; border-bottom-color: #fff; }
 .hero-sub { margin: 8px 0 0; color: rgba(255,255,255,.85); font-size: 14px; }
 
+[hidden] { display: none !important; }
+
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.hero-actions:not(:has(:not([hidden]))) { display: none; }
+.share-btn {
+  display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 16px; border: 0; border-radius: 999px;
+  background: #fff; color: var(--orange-700); font-weight: 700; font-size: 13.5px; cursor: pointer;
+  box-shadow: 0 6px 16px -6px rgba(67, 20, 7, .45); transition: transform .15s, box-shadow .2s;
+}
+.share-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -8px rgba(67, 20, 7, .55); }
+.share-btn:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(255, 255, 255, .45); }
+.share-btn svg { width: 16px; height: 16px; }
+.sync-pill {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: #fff;
+  background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .25);
+}
+.sync-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #fff; }
+.sync-pill.saving::before { animation: pulse 1s ease-in-out infinite; }
+.sync-pill.offline::before { background: var(--owe); box-shadow: 0 0 0 2px rgba(255,255,255,.7); }
+.sync-pill.local::before { background: transparent; border: 1.5px solid #fff; }
+@keyframes pulse { 50% { opacity: .25; } }
+
 .stats { position: relative; display: flex; gap: 10px; margin: 0; }
 .stat {
   min-width: 132px; padding: 14px 16px; border-radius: 16px;
