@@ -88,6 +88,13 @@ create table if not exists public.tharun_expense_splitter_members (
 );
 create unique index if not exists tharun_expense_splitter_members_unique_name
   on public.tharun_expense_splitter_members (group_id, lower(name));
+-- Optional picture: a short emoji, or a small image as a base64 data URL (the app shrinks photos to 96×96).
+alter table public.tharun_expense_splitter_members
+  add column if not exists avatar text check (
+    avatar is null
+    or (char_length(avatar) <= 16 and avatar !~ '[<>&"''[:space:]]')
+    or (char_length(avatar) <= 16000 and avatar ~ '^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$')
+  );
 
 create table if not exists public.tharun_expense_splitter_expenses (
   group_id    uuid not null references public.tharun_expense_splitter_groups on delete cascade,
@@ -312,7 +319,7 @@ language sql stable security definer set search_path = public, pg_catalog as $$
     'version',   g.version,
     'createdAt', g.created_at,
     'members', coalesce((
-      select jsonb_agg(jsonb_build_object('id', m.id, 'name', m.name) order by m.position)
+      select jsonb_agg(jsonb_strip_nulls(jsonb_build_object('id', m.id, 'name', m.name, 'avatar', m.avatar)) order by m.position)
       from tharun_expense_splitter_members m where m.group_id = g.id), '[]'::jsonb),
     'expenses', coalesce((
       select jsonb_agg(jsonb_build_object(
@@ -375,8 +382,8 @@ begin
   delete from tharun_expense_splitter_expenses    where group_id = p_group;   -- cascades to expense_splits
   delete from tharun_expense_splitter_members     where group_id = p_group;
 
-  insert into tharun_expense_splitter_members (group_id, id, name, position)
-  select p_group, m->>'id', m->>'name', t.ord
+  insert into tharun_expense_splitter_members (group_id, id, name, position, avatar)
+  select p_group, m->>'id', m->>'name', t.ord, nullif(m->>'avatar', '')
   from jsonb_array_elements(v_mem) with ordinality as t(m, ord);
 
   insert into tharun_expense_splitter_expenses (group_id, id, description, category, paid_by, amount, split_mode, split_input, created_at)

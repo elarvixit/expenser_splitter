@@ -10,6 +10,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <meta name="theme-color" content="#FFFBF7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#15100D" media="(prefers-color-scheme: dark)">
+  <script>
+    // Apply a saved theme before first paint, so dark mode never flashes white.
+    try { var t = localStorage.getItem('splitter:theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -26,6 +32,10 @@
           <span class="groups-count num" id="groups-count"></span>
         </button>
         <button class="btn btn-ghost" id="btn-demo" type="button">Load demo</button>
+        <button class="icon-btn btn-theme" id="btn-theme" type="button" aria-label="Switch theme">
+          <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 12.5A6.5 6.5 0 0 1 7.5 4.5a6.5 6.5 0 1 0 8 8z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.7 4.7l1.3 1.3M14 14l1.3 1.3M4.7 15.3 6 14M14 6l1.3-1.3"/></svg>
+        </button>
         <button class="btn btn-account" id="btn-account" type="button" aria-haspopup="dialog" hidden>
           <span class="account-initial" id="account-initial" aria-hidden="true"></span>
           <svg class="account-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="7" r="3.2"/><path d="M4 17c.8-3.2 3.2-4.8 6-4.8s5.2 1.6 6 4.8"/></svg>
@@ -157,8 +167,13 @@
     </div>
 
     <footer class="foot">
-      Amounts are stored as whole paise. Only transactions are saved — balances are always recomputed.
-      <a href="tests/">Run the test suite →</a>
+      <div class="segmented segmented-sm theme-choice" role="radiogroup" aria-label="Theme">
+        <label><input type="radio" name="theme" value="system" checked><span>System</span></label>
+        <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+        <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+      </div>
+      <p>Amounts are stored as whole paise. Only transactions are saved — balances are always recomputed.
+        <a href="tests/">Run the test suite →</a></p>
     </footer>
   </main>
 
@@ -354,6 +369,42 @@
     </div>
   </dialog>
 
+  <!-- Person: name, emoji or photo -->
+  <dialog class="sheet sheet-sm" id="person-dialog" aria-labelledby="person-title">
+    <form class="sheet-frame" id="person-form" novalidate autocomplete="off">
+      <header class="sheet-head">
+        <h3 id="person-title">Edit person</h3>
+        <button class="icon-btn" type="button" data-close aria-label="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+      <div class="sheet-body">
+        <div class="person-top">
+          <div class="person-preview" id="person-preview" aria-hidden="true"></div>
+          <label class="field">
+            <span>Name</span>
+            <input id="person-name" maxlength="24">
+          </label>
+        </div>
+        <div class="field">
+          <span>Picture</span>
+          <div class="emoji-grid" id="person-emojis"></div>
+          <label class="btn btn-soft btn-sm photo-btn">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7h3l1.5-2h5L14 7h3v9H3z"/><circle cx="10" cy="11.2" r="2.8"/></svg>
+            <span>Upload a photo</span>
+            <input id="person-photo" type="file" accept="image/*">
+          </label>
+          <p class="auth-note">Photos are shrunk to a small square before saving.</p>
+        </div>
+        <p class="form-error" id="person-error" role="alert"></p>
+      </div>
+      <footer class="sheet-foot">
+        <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="config.js"></script>
@@ -361,6 +412,7 @@
   <script src="src/categories.js"></script>
   <script src="src/charts.js"></script>
   <script src="src/statement.js"></script>
+  <script src="src/ui.js"></script>
   <script src="src/remote.js"></script>
   <script src="app.js"></script>
 </body>

@@ -9,6 +9,7 @@ src/balances.js                  pure balance engine (browser global + CommonJS)
 src/categories.js                categories, guessing from descriptions, monthly totals (pure)
 src/charts.js                    monthly spend chart (SVG), legend and table view
 src/statement.js                 PDF statement (jsPDF + autotable, pinned with SRI)
+src/ui.js                        category icons, avatars (emoji / photo), count-up + confetti
 src/remote.js                    tiny Supabase client (calls the splitter_* database functions)
 config.js                        public Supabase URL + anon key (empty = local-only mode)
 supabase/schema.sql              tables + functions; paste into the Supabase SQL Editor
@@ -42,6 +43,12 @@ With Node installed you can also run `node tests/balances.test.js` and `node tes
 - **Who spent what:** a donut of each person’s spending in the open group. **Paid** is out of
   their own pocket; **Share** is their portion of the expenses. Payments between members are not
   counted as spending.
+- **People:** tap a person to rename them or give them an emoji or a photo (shrunk to a 96×96 JPEG
+  of about 3 KB before syncing).
+- **Look and feel:** light and dark themes (System / Light / Dark in the footer, sun/moon in the
+  header), category icons, numbers that count to their new value, bars and charts that grow in,
+  rows that slide in and fold away, and a confetti burst when a change squares everyone up. All
+  motion is off when the device asks for reduced motion.
 - **PDF statement:** **Export PDF** (in the orange banner), or the download icon next to any group
   in the **Groups** list, downloads the open group's balances, settle-up plan,
   spending by category and month, every expense and every payment. The PDF fonts have no ₹ sign,

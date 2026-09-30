@@ -9,6 +9,13 @@
   'use strict';
 
   const SVG = 'http://www.w3.org/2000/svg';
+
+  // Palette hexes (light steps) → theme-aware CSS variables, so charts re-colour in dark mode.
+  const PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+  function cssColor(hex) {
+    const i = PALETTE.indexOf(String(hex).toLowerCase());
+    return i < 0 ? hex : `var(--viz-${i + 1}, ${hex})`;
+  }
   const el = (tag, attrs, parent) => {
     const node = document.createElementNS(SVG, tag);
     for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
@@ -89,9 +96,11 @@
     const GAP = 2;
     const columns = [];
 
+    if (opts && opts.animate) svg.classList.add('enter'); // columns grow from the baseline, one after another
+
     summary.months.forEach((month, i) => {
       const cx = pad.left + band * i + band / 2;
-      const g = el('g', { class: 'chart-col' }, svg);
+      const g = el('g', { class: 'chart-col', style: `animation-delay:${Math.min(i * 45, 540)}ms` }, svg);
       const present = summary.series.filter((s) => month.byCategory[s.name] > 0);
       let cum = 0;
       present.forEach((s, k) => {
@@ -102,8 +111,8 @@
         cum += v;
         if (h <= 0) return;
         const isTop = k === present.length - 1;
-        if (isTop) el('path', { d: topRoundedPath(cx - barW / 2, y1, barW, h, 4), fill: s.color }, g);
-        else el('rect', { x: cx - barW / 2, y: y1, width: barW, height: h, fill: s.color }, g);
+        if (isTop) el('path', { d: topRoundedPath(cx - barW / 2, y1, barW, h, 4), style: `fill:${cssColor(s.color)}` }, g);
+        else el('rect', { x: cx - barW / 2, y: y1, width: barW, height: h, style: `fill:${cssColor(s.color)}` }, g);
       });
       if ((n - 1 - i) % labelEvery === 0) {
         const t = el('text', { x: cx, y: height - 8, 'text-anchor': 'middle', class: 'chart-axis' }, svg);
@@ -125,7 +134,7 @@
       for (const s of col.present.slice().reverse()) {
         const row = html('div', 'tt-row', tooltip);
         const key = html('i', 'tt-key', row);
-        key.style.background = s.color;
+        key.style.background = cssColor(s.color);
         html('strong', null, row, money(col.month.byCategory[s.name]));
         html('span', null, row, s.name);
       }
@@ -165,7 +174,7 @@
     for (const s of summary.series) {
       const li = html('li', null, legend);
       const key = html('i', 'legend-key', li);
-      key.style.background = s.color;
+      key.style.background = cssColor(s.color);
       const name = html('span', 'legend-name', li, s.name);
       if (s.includes.length) name.title = `Also includes: ${s.includes.join(', ')}`;
       html('span', 'legend-value num', li, money(s.total));
@@ -233,13 +242,14 @@
     const pct = (v) => Math.round((v / data.total) * 1000) / 10;
     const slices = [];
     let angle = 0;
-    for (const it of data.items) {
+    if (opts && opts.animate) svg.classList.add('enter');
+    for (const [k, it] of data.items.entries()) {
       const sweep = (it.total / data.total) * Math.PI * 2;
       // a single 100% slice can't be one arc: draw it as two halves
       const d = sweep >= Math.PI * 2 - 1e-6
         ? slicePath(c, c, r0, r1, 0, Math.PI) + slicePath(c, c, r0, r1, Math.PI, Math.PI * 2)
         : slicePath(c, c, r0, r1, angle, angle + sweep);
-      const path = el('path', { d, fill: it.color, class: 'donut-slice', tabindex: 0,
+      const path = el('path', { d, style: `fill:${cssColor(it.color)};animation-delay:${k * 70}ms`, class: 'donut-slice', tabindex: 0,
         'aria-label': `${it.name}: ${money(it.total)}, ${pct(it.total)}%` }, svg);
       slices.push({ path, it, mid: angle + sweep / 2 });
       angle += sweep;
@@ -289,7 +299,7 @@
     for (const it of data.items) {
       const li = html('li', null, legend);
       const key = html('i', 'legend-key', li);
-      key.style.background = it.color;
+      key.style.background = cssColor(it.color);
       const name = html('span', 'legend-name', li, it.name);
       if (it.includes) name.title = it.includes.join(', ');
       html('span', 'legend-value num', li, money(it.total));
@@ -297,5 +307,5 @@
     }
   }
 
-  root.SplitCharts = { renderSpending, renderDonut, shortRupees, niceScale };
+  root.SplitCharts = { renderSpending, renderDonut, shortRupees, niceScale, cssColor };
 })(typeof self !== 'undefined' ? self : this);

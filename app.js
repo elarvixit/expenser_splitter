@@ -17,6 +17,7 @@
     ValidationError,
   } = window.SplitCore;
   const Cat = window.SplitCategories;
+  const UI = window.SplitUI;
 
   const STORE_KEY = 'splitter:v2';
   const LEGACY_KEY = 'halve:v1'; // single-group data from the first version
@@ -122,6 +123,8 @@
 
   /** Apply a change to a copy of a group; only keep it if the ledger is still valid. */
   function commit(mutate, groupId = state.id) {
+    const quiet = quietCommit; // read and clear first, so a failed change can't leave it set
+    quietCommit = false;
     const i = store.groups.findIndex((g) => g.id === groupId);
     if (i < 0) return;
     const next = JSON.parse(JSON.stringify(store.groups[i]));
@@ -131,6 +134,7 @@
     store.groups[i] = next;
     if (next.id === state.id) state = next;
     save();
+    celebrateNext = next.id === state.id && !quiet;
     render();
     if (canSync()) {
       pendingOps(next.id).push({ rev: next.rev, mutate }); // kept so it can be replayed on a conflict
@@ -476,12 +480,36 @@
     ['#FED7AA', '#7C2D12'],
     ['#C2410C', '#FFF7ED'],
   ];
-  function avatar(id, small) {
-    const i = Math.max(0, state.members.findIndex((m) => m.id === id));
-    const [bg, fg] = AVATAR_TONES[i % AVATAR_TONES.length];
-    const initials = nameOf(id).split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
-    return `<span class="avatar${small ? ' avatar-sm' : ''}" style="background:${bg};color:${fg}">${esc(initials)}</span>`;
+  /** A member's avatar: their photo, their emoji, or coloured initials. */
+  function avatarFor(m, index, small) {
+    const size = small ? ' avatar-sm' : '';
+    const value = m && m.avatar;
+    const kind = UI.avatarKind(value);
+    if (kind === 'photo') return `<span class="avatar photo${size}"><img src="${value}" alt=""></span>`; // validated data: URL
+    if (kind === 'emoji') return `<span class="avatar emoji${size}">${esc(value)}</span>`;
+    const [bg, fg] = AVATAR_TONES[Math.max(0, index) % AVATAR_TONES.length];
+    const initials = (m ? m.name : '?').split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+    return `<span class="avatar${size}" style="background:${bg};color:${fg}">${esc(initials)}</span>`;
   }
+
+  function avatar(id, small) {
+    const i = state.members.findIndex((m) => m.id === id);
+    return avatarFor(state.members[i], i, small);
+  }
+
+  // ---------- motion helpers ----------
+
+  const counts = new Map(); // what each animated number showed last, so changes count from there
+  function countUp(el, key, value, format) {
+    const from = counts.has(key) ? counts.get(key) : 0;
+    counts.set(key, value);
+    UI.countTo(el, from, value, format || formatPaise);
+  }
+
+  const barWidths = new Map(); // key → { w, cls } of each balance bar last frame
+  let celebrateNext = false; // set by commit(): only the user's own change can trigger the celebration
+  let quietCommit = false; // set before an Undo, which shouldn't celebrate again
+  const settledBefore = new Map(); // groupId → was everyone square at the last render
 
   const money = (p, opts) => `<span class="num">${formatPaise(p, opts)}</span>`;
   const humanError = (err) => {
@@ -526,6 +554,20 @@
     renderPeopleSpend();
     $('#btn-add').disabled = state.members.length === 0;
     $('#btn-pay').disabled = state.members.length < 2;
+
+    // Celebrate when the user's own change squares everyone up.
+    const settledNow = state.expenses.length > 0 && transfers.length === 0;
+    if (celebrateNext && settledBefore.get(state.id) === false && settledNow) celebrate();
+    settledBefore.set(state.id, settledNow);
+    celebrateNext = false;
+  }
+
+  function celebrate() {
+    UI.confetti();
+    const card = $('#transfers .settled');
+    if (card) card.classList.add('pop');
+    // after the action's own toast ("Parthiv paid Akhil …"), so this one stays on screen
+    setTimeout(() => toast('Everyone’s square! 🎉 No payments left in this group'), 0);
   }
 
   function renderHero(balances, transfers) {
@@ -539,9 +581,12 @@
       ? `${plural(state.members.length, 'member')} · ${plural(state.expenses.length, 'expense')} · ${plural(state.settlements.length, 'payment')}`
       : 'Add the people you are splitting with to get started.';
     $('#stats').innerHTML = `
-      <div class="stat"><dt>Total spent</dt><dd>${formatPaise(spent)}</dd></div>
-      <div class="stat"><dt>Outstanding</dt><dd>${formatPaise(outstanding)}</dd></div>
-      <div class="stat"><dt>To settle</dt><dd>${plural(transfers.length, 'payment')}</dd></div>`;
+      <div class="stat"><dt>Total spent</dt><dd data-count="spent"></dd></div>
+      <div class="stat"><dt>Outstanding</dt><dd data-count="owed"></dd></div>
+      <div class="stat"><dt>To settle</dt><dd data-count="settle"></dd></div>`;
+    countUp($('#stats [data-count=spent]'), `spent:${state.id}`, spent);
+    countUp($('#stats [data-count=owed]'), `owed:${state.id}`, outstanding);
+    countUp($('#stats [data-count=settle]'), `settle:${state.id}`, transfers.length, (n) => plural(n, 'payment'));
   }
 
   function renderBalances(balances) {
@@ -563,14 +608,24 @@
         const cls = v > 0 ? 'get' : v < 0 ? 'owe' : 'zero';
         const label = v > 0 ? 'gets back' : v < 0 ? 'owes' : 'settled up';
         const width = (Math.abs(v) / max) * 50;
+        const prev = barWidths.get(`${state.id}:${m.id}`);
+        const from = prev && prev.cls === cls ? prev.w : 0; // bars grow from where they were
+        barWidths.set(`${state.id}:${m.id}`, { w: width, cls });
         return `<li>
           ${avatar(m.id)}
           <div class="who"><strong>${esc(m.name)}</strong><small>Paid ${formatPaise(paid[m.id] || 0)}</small></div>
-          <div class="bar" role="img" aria-label="${esc(m.name)} ${label} ${formatPaise(Math.abs(v))}">${v ? `<i class="${cls}" style="width:${width}%"></i>` : ''}</div>
-          <div class="amt ${cls}"><small>${label}</small>${v ? formatPaise(Math.abs(v)) : '—'}</div>
+          <div class="bar" role="img" aria-label="${esc(m.name)} ${label} ${formatPaise(Math.abs(v))}">${v ? `<i class="${cls}" data-w="${width}" style="width:${from}%"></i>` : ''}</div>
+          <div class="amt ${cls}"><small>${label}</small><span data-bal="${esc(m.id)}"></span></div>
         </li>`;
       })
       .join('');
+    for (const m of state.members) {
+      const v = Math.abs(balances[m.id]);
+      countUp(list.querySelector(`[data-bal="${CSS.escape(m.id)}"]`), `bal:${state.id}:${m.id}`, v, (p) => (p ? formatPaise(p) : '—'));
+    }
+    const grow = () => list.querySelectorAll('.bar i[data-w]').forEach((bar) => { bar.style.width = `${bar.dataset.w}%`; });
+    if (document.hidden) grow(); // no animation frames in hidden tabs
+    else requestAnimationFrame(grow);
   }
 
   function renderTransfers(transfers) {
@@ -623,12 +678,31 @@
     $('#members-sub').textContent = state.members.length
       ? `${plural(state.members.length, 'person')} in this group`.replace('persons', 'people')
       : 'Who are you splitting with?';
-    $('#members').innerHTML = state.members
-      .map((m) => `<li>${avatar(m.id, true)}<span>${esc(m.name)}</span>
+    const list = $('#members');
+    list.innerHTML = state.members
+      .map((m) => `<li data-row="m:${esc(m.id)}">
+        <button class="member-pick" type="button" data-person="${esc(m.id)}" aria-label="Edit ${esc(m.name)} (name, emoji or photo)">
+          ${avatar(m.id, true)}<span>${esc(m.name)}</span></button>
         <button class="icon-btn" type="button" data-remove="${esc(m.id)}" aria-label="Remove ${esc(m.name)}">
           <svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button></li>`)
       .join('');
+    markNewRows(list, 'members');
   }
+
+  // Rows that weren't on screen last time slide in (not on first paint or when switching groups).
+  const seenRows = new Map(); // `${groupId}:${listName}` → Set of row keys
+  function markNewRows(list, name) {
+    const key = `${state.id}:${name}`;
+    const before = seenRows.get(key);
+    const now = new Set();
+    list.querySelectorAll('[data-row]').forEach((li) => {
+      now.add(li.dataset.row);
+      if (before && !before.has(li.dataset.row)) li.classList.add('enter');
+    });
+    seenRows.set(key, now);
+  }
+
+  const catColor = (name) => window.SplitCharts.cssColor(categoryColor(name));
 
   const categoryColor = (name) => Cat.presetColor(name) || Cat.CUSTOM_COLOR;
 
@@ -636,13 +710,15 @@
     const n = e.splits.filter((s) => s.amount > 0).length;
     const mode = e.splitMode === 'exact' ? 'exact amounts' : e.splitMode === 'percent' ? 'by percentage' : 'equally';
     const cat = Cat.categoryOf(e);
-    return `<i class="cat-dot" style="background:${categoryColor(cat)}"></i>${esc(cat)} · ${esc(nameOf(e.paidBy))} paid · split ${mode} · ${plural(n, 'person').replace('persons', 'people')}`;
+    return `${UI.categoryIcon(Cat.isPreset(cat) ? cat : 'custom', catColor(cat))}${esc(cat)} · ${esc(nameOf(e.paidBy))} paid · split ${mode} · ${plural(n, 'person').replace('persons', 'people')}`;
   }
 
   // ---------- spending chart ----------
 
   let chartWidth = 0;
   let spendMonth = null; // a month key ('2026-09') when showing that month day by day
+  let lastSpendSig = '';
+  let lastDonutSig = '';
 
   function renderSpending() {
     const scope = (document.querySelector('input[name=spend-scope]:checked') || {}).value || 'group';
@@ -662,7 +738,12 @@
     $('#spend-back').hidden = !spendMonth;
     const box = $('#spend-chart');
     chartWidth = box.clientWidth;
+    // Grow in only when the numbers change (not on every redraw or resize).
+    const sig = JSON.stringify([state.id, scope, spendMonth, summary.months.map((m) => [m.key, m.total])]);
+    const animate = sig !== lastSpendSig;
+    lastSpendSig = sig;
     window.SplitCharts.renderSpending(box, summary, {
+      animate,
       formatMoney: (p) => formatPaise(p),
       bucketName: spendMonth ? 'Day' : 'Month',
       onSelect: spendMonth ? null : (month) => { spendMonth = month.key; renderSpending(); },
@@ -679,7 +760,11 @@
     $('#people-spend-sub').textContent = mode === 'share'
       ? 'Each person’s portion of the expenses'
       : 'Out of their own pocket (payments between you are not counted)';
+    const sig = JSON.stringify([state.id, mode, data.items.map((it) => [it.id, it.total])]);
+    const animate = sig !== lastDonutSig;
+    lastDonutSig = sig;
     window.SplitCharts.renderDonut($('#people-chart'), data, {
+      animate,
       formatMoney: (p) => formatPaise(p),
       title: mode === 'share' ? 'Share of expenses' : 'Paid out of pocket',
       centerLabel: mode === 'share' ? 'shared' : 'paid',
@@ -736,12 +821,13 @@
     const list = $('#activity');
     if (!items.length) {
       list.innerHTML = `<li class="empty" style="display:block"><strong>Nothing yet</strong>Expenses and payments will show up here.</li>`;
+      seenRows.set(`${state.id}:activity`, new Set()); // so the first real item slides in
       return;
     }
     list.innerHTML = items
       .map(({ kind, item }) => {
         if (kind === 'expense') {
-          return `<li>
+          return `<li data-row="e:${esc(item.id)}">
             <span class="act-icon">${dateBadge(item.createdAt)}</span>
             <div class="act-main"><strong>${esc(item.description || 'Expense')}</strong><small>${describeSplit(item)}</small></div>
             <div class="act-side">
@@ -754,7 +840,7 @@
               </span>
             </div></li>`;
         }
-        return `<li>
+        return `<li data-row="s:${esc(item.id)}">
           <span class="act-icon pay"><svg viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4"/></svg></span>
           <div class="act-main"><strong>${esc(nameOf(item.from))} paid ${esc(nameOf(item.to))}</strong>
             <small>Payment${item.note ? ' · ' + esc(item.note) : ''}</small></div>
@@ -767,6 +853,7 @@
           </div></li>`;
       })
       .join('');
+    markNewRows(list, 'activity');
   }
 
   // ---------- members & group ----------
@@ -785,7 +872,9 @@
     input.focus();
   });
 
-  $('#members').addEventListener('click', (ev) => {
+  $('#members').addEventListener('click', async (ev) => {
+    const person = ev.target.closest('[data-person]');
+    if (person) return openPerson(person.dataset.person);
     const btn = ev.target.closest('[data-remove]');
     if (!btn) return;
     const id = btn.dataset.remove;
@@ -793,6 +882,9 @@
       toast(`${nameOf(id)} is part of existing transactions — remove those first`);
       return;
     }
+    const row = btn.closest('li');
+    if (row.classList.contains('leaving')) return;
+    await UI.animateOut(row);
     commit((s) => { s.members = s.members.filter((m) => m.id !== id); });
   });
 
@@ -813,16 +905,21 @@
     if (delP) removeWithUndo('settlements', delP.dataset.delPayment, 'Payment deleted');
   });
 
-  function removeWithUndo(collection, id, message) {
+  async function removeWithUndo(collection, id, message) {
+    const row = $('#activity').querySelector(`[data-row="${collection === 'expenses' ? 'e' : 's'}:${CSS.escape(id)}"]`);
+    if (row && row.classList.contains('leaving')) return;
+    const groupId = state.id;
+    await UI.animateOut(row); // the row folds away, then the change is made
+    if (state.id !== groupId) return;
     const index = state[collection].findIndex((x) => x.id === id);
     if (index < 0) return;
     const removed = state[collection][index];
-    const groupId = state.id;
     commit((s) => { s[collection].splice(index, 1); });
     toast(message, {
       label: 'Undo',
       run: () => {
         try {
+          quietCommit = true;
           commit((s) => { s[collection].splice(Math.min(index, s[collection].length), 0, removed); }, groupId);
         } catch (err) {
           toast(humanError(err));
@@ -895,10 +992,10 @@
     const chips = Cat.PRESETS.map((p) => {
       const on = !category.custom && category.value === p.name;
       return `<button type="button" class="cat-chip" role="radio" aria-checked="${on}" data-cat="${esc(p.name)}">
-        <i style="background:${p.color}"></i>${esc(p.name)}</button>`;
+        ${UI.categoryIcon(p.name, catColor(p.name))}${esc(p.name)}</button>`;
     });
     chips.push(`<button type="button" class="cat-chip" role="radio" aria-checked="${category.custom}" data-cat-custom>
-      <i style="background:${Cat.CUSTOM_COLOR}"></i>Custom…</button>`);
+      ${UI.categoryIcon('custom', window.SplitCharts.cssColor(Cat.CUSTOM_COLOR))}Custom…</button>`);
     $('#ex-cats').innerHTML = chips.join('');
     $('#ex-cat-custom').hidden = !category.custom;
     const customs = Cat.customCategories(store.groups.flatMap((g) => g.expenses));
@@ -1572,6 +1669,100 @@
   for (const d of [authDialog, accountDialog]) {
     d.addEventListener('close', () => document.body.appendChild($('#toasts')));
   }
+
+  // ---------- person (name, emoji or photo) ----------
+
+  const personDialog = $('#person-dialog');
+  let personDraft = null; // { id, avatar }
+
+  function renderPersonPreview() {
+    const i = state.members.findIndex((m) => m.id === personDraft.id);
+    const m = Object.assign({}, state.members[i], { name: $('#person-name').value.trim() || state.members[i].name, avatar: personDraft.avatar });
+    $('#person-preview').innerHTML = avatarFor(m, i, false);
+    personDialog.querySelectorAll('[data-emoji]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.emoji === (personDraft.avatar || '')));
+    });
+  }
+
+  function openPerson(id) {
+    const m = state.members.find((x) => x.id === id);
+    if (!m) return;
+    personDraft = { id, avatar: UI.avatarKind(m.avatar) ? m.avatar : '' };
+    $('#person-name').value = m.name;
+    $('#person-error').textContent = '';
+    $('#person-emojis').innerHTML = [''].concat(UI.EMOJIS)
+      .map((e) => e
+        ? `<button type="button" class="emoji-btn" data-emoji="${esc(e)}" aria-label="Use ${esc(e)}">${esc(e)}</button>`
+        : `<button type="button" class="emoji-btn initials" data-emoji="" aria-label="Use initials">Aa</button>`)
+      .join('');
+    renderPersonPreview();
+    personDialog.showModal();
+  }
+
+  personDialog.addEventListener('click', (ev) => {
+    if (ev.target === personDialog || ev.target.closest('[data-close]')) return personDialog.close();
+    const pick = ev.target.closest('[data-emoji]');
+    if (pick) {
+      personDraft.avatar = pick.dataset.emoji;
+      renderPersonPreview();
+    }
+  });
+  $('#person-name').addEventListener('input', renderPersonPreview);
+
+  $('#person-photo').addEventListener('change', async (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!file) return;
+    try {
+      personDraft.avatar = await UI.resizePhoto(file);
+      $('#person-error').textContent = '';
+      renderPersonPreview();
+    } catch (err) {
+      $('#person-error').textContent = err.message;
+    }
+  });
+
+  $('#person-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const id = personDraft.id;
+    const name = $('#person-name').value.trim().replace(/\s+/g, ' ');
+    if (!name) return ($('#person-error').textContent = 'Give this person a name.');
+    if (state.members.some((m) => m.id !== id && m.name.toLowerCase() === name.toLowerCase())) {
+      return ($('#person-error').textContent = `${name} is already in the group.`);
+    }
+    const avatarValue = personDraft.avatar;
+    commit((s) => {
+      const m = s.members.find((x) => x.id === id);
+      if (!m) return;
+      m.name = name.slice(0, 24);
+      if (UI.avatarKind(avatarValue)) m.avatar = avatarValue;
+      else delete m.avatar;
+    });
+    personDialog.close();
+  });
+
+  personDialog.addEventListener('close', () => document.body.appendChild($('#toasts')));
+
+  // ---------- theme (system / light / dark) ----------
+
+  const THEME_KEY = 'splitter:theme';
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  const effectiveTheme = () => document.documentElement.dataset.theme || (darkQuery && darkQuery.matches ? 'dark' : 'light');
+
+  function applyTheme(choice) {
+    if (choice === 'light' || choice === 'dark') document.documentElement.dataset.theme = choice;
+    else delete document.documentElement.dataset.theme;
+    try { choice === 'system' ? localStorage.removeItem(THEME_KEY) : localStorage.setItem(THEME_KEY, choice); } catch (_) { /* ignore */ }
+    const current = (() => { try { return localStorage.getItem(THEME_KEY) || 'system'; } catch (_) { return 'system'; } })();
+    document.querySelectorAll('input[name=theme]').forEach((r) => { r.checked = r.value === current; });
+    $('#btn-theme').setAttribute('aria-label', effectiveTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+    $('#btn-theme').classList.toggle('is-dark', effectiveTheme() === 'dark');
+  }
+
+  $('#btn-theme').addEventListener('click', () => applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark'));
+  document.querySelectorAll('input[name=theme]').forEach((r) => r.addEventListener('change', () => applyTheme(r.value)));
+  if (darkQuery && darkQuery.addEventListener) darkQuery.addEventListener('change', () => applyTheme((() => { try { return localStorage.getItem(THEME_KEY) || 'system'; } catch (_) { return 'system'; } })()));
+  applyTheme((() => { try { return localStorage.getItem(THEME_KEY) || 'system'; } catch (_) { return 'system'; } })());
 
   // ---------- start ----------
 
