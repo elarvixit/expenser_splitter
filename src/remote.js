@@ -1,7 +1,8 @@
 /*
  * Splitter — minimal Supabase client. Calls the database functions defined in
  * supabase/schema.sql through Supabase's REST endpoint (/rest/v1/rpc/<fn>).
- * No SDK needed: the app only ever calls create_group, get_group and save_group.
+ * No SDK needed: the app only ever calls splitter_create_group, splitter_get_group and
+ * splitter_save_group (prefixed so they can live next to another app in a shared project).
  */
 (function (root) {
   'use strict';
@@ -28,9 +29,9 @@
     }
 
     return {
-      createGroup: (name) => rpc('create_group', { p_name: name }),
-      getGroup: (token) => rpc('get_group', { p_token: token }),
-      saveGroup: (token, version, group) => rpc('save_group', { p_token: token, p_version: version, p_group: group }),
+      createGroup: (name) => rpc('splitter_create_group', { p_name: name }),
+      getGroup: (token) => rpc('splitter_get_group', { p_token: token }),
+      saveGroup: (token, version, group) => rpc('splitter_save_group', { p_token: token, p_version: version, p_group: group }),
     };
   }
 

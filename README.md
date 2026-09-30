@@ -28,7 +28,10 @@ With `config.js` left empty, Splitter keeps data only in the browser. To sync ac
 and share groups:
 
 1. In your Supabase project, open **SQL Editor → New query**, paste all of
-   `supabase/schema.sql` and click **Run**. It's safe to run again later.
+   `supabase/schema.sql` and click **Run**. It's safe to run again later. It works in a new project
+   or in a shared team project: all tables go in a private `splitter` schema (not exposed through
+   the API), and the only additions to `public` are three `splitter_`-prefixed functions. Nothing
+   else in the project is changed. The top of the file has the two commands to remove it.
 2. Copy the **Project URL** and the **anon / publishable key** from **Project Settings → API**
    into `config.js`, then commit and push. Vercel redeploys automatically, and no Vercel
    environment variables are needed.
@@ -36,8 +39,8 @@ and share groups:
    `https://…/#g=<secret>`, and anyone who opens it can view and edit that group.
 
 How it stays safe with a public key: the tables have Row Level Security on with no policies, and
-the anon role has no table privileges. The browser can only call `create_group`, `get_group`
-and `save_group`, and each one needs the group's secret token. Never put the `service_role`
+the anon role has no table privileges. The browser can only call `splitter_create_group`,
+`splitter_get_group` and `splitter_save_group`, and each one needs the group's secret token. Never put the `service_role`
 key in `config.js`.
 
 Edits apply instantly on the device, then sync. `save_group` checks a version number. If

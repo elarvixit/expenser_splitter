@@ -3,17 +3,31 @@
 -- Paste this whole file into Supabase → SQL Editor → New query → Run.
 -- Safe to re-run: it drops and recreates the functions, and creates tables only if missing.
 --
+-- Works in a brand-new project or alongside an existing app in a shared project:
+--   * All tables live in their own schema, "splitter", which is NOT exposed through the API
+--     and cannot clash with tables in "public".
+--   * The only objects added to "public" are three functions prefixed "splitter_".
+--   * Nothing else in the project is created, changed or dropped.
+--
+-- To remove Splitter completely later:
+--   drop function if exists public.splitter_create_group(text), public.splitter_get_group(uuid),
+--                            public.splitter_save_group(uuid, integer, jsonb);
+--   drop schema if exists splitter cascade;
+--
 -- Security model
 --   * A group is reached only through its secret token (a random UUID in the share link).
 --   * The tables have Row Level Security on and NO policies, and anon has no table privileges,
 --     so the public anon key cannot list or read anything directly.
 --   * The browser calls three SECURITY DEFINER functions, each of which requires the token:
---       create_group(name)                 → token
---       get_group(token)                   → the group's transactions as JSON
---       save_group(token, version, group)  → new version (optimistic concurrency)
+--       splitter_create_group(name)                 → token
+--       splitter_get_group(token)                   → the group's transactions as JSON
+--       splitter_save_group(token, version, group)  → new version (optimistic concurrency)
 --   * Balances are never stored. The app recomputes them from these transactions.
 
-create table if not exists groups (
+create schema if not exists splitter;
+revoke all on schema splitter from public, anon, authenticated;
+
+create table if not exists splitter.groups (
   id         uuid primary key default gen_random_uuid(),
   token      uuid not null unique default gen_random_uuid(),
   name       text not null check (char_length(name) between 1 and 40),
@@ -22,17 +36,17 @@ create table if not exists groups (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists members (
-  group_id uuid not null references groups on delete cascade,
+create table if not exists splitter.members (
+  group_id uuid not null references splitter.groups on delete cascade,
   id       text not null,
   name     text not null check (char_length(name) between 1 and 24),
   position integer not null,
   primary key (group_id, id)
 );
-create unique index if not exists members_unique_name on members (group_id, lower(name));
+create unique index if not exists members_unique_name on splitter.members (group_id, lower(name));
 
-create table if not exists expenses (
-  group_id    uuid not null references groups on delete cascade,
+create table if not exists splitter.expenses (
+  group_id    uuid not null references splitter.groups on delete cascade,
   id          text not null,
   description text not null check (char_length(description) between 1 and 60),
   paid_by     text not null,
@@ -41,21 +55,21 @@ create table if not exists expenses (
   split_input jsonb not null default '{}'::jsonb,                        -- what the user typed (for editing)
   created_at  timestamptz not null,
   primary key (group_id, id),
-  foreign key (group_id, paid_by) references members (group_id, id)
+  foreign key (group_id, paid_by) references splitter.members (group_id, id)
 );
 
-create table if not exists expense_splits (
+create table if not exists splitter.expense_splits (
   group_id   uuid not null,
   expense_id text not null,
   member_id  text not null,
   amount     bigint not null check (amount >= 0),                        -- paise
   primary key (group_id, expense_id, member_id),
-  foreign key (group_id, expense_id) references expenses (group_id, id) on delete cascade,
-  foreign key (group_id, member_id) references members (group_id, id)
+  foreign key (group_id, expense_id) references splitter.expenses (group_id, id) on delete cascade,
+  foreign key (group_id, member_id) references splitter.members (group_id, id)
 );
 
-create table if not exists settlements (
-  group_id    uuid not null references groups on delete cascade,
+create table if not exists splitter.settlements (
+  group_id    uuid not null references splitter.groups on delete cascade,
   id          text not null,
   from_member text not null,
   to_member   text not null,
@@ -64,26 +78,26 @@ create table if not exists settlements (
   created_at  timestamptz not null,
   primary key (group_id, id),
   check (from_member <> to_member),
-  foreign key (group_id, from_member) references members (group_id, id),
-  foreign key (group_id, to_member) references members (group_id, id)
+  foreign key (group_id, from_member) references splitter.members (group_id, id),
+  foreign key (group_id, to_member) references splitter.members (group_id, id)
 );
 
 -- Lock the tables: only the functions below can touch them.
-alter table groups         enable row level security;
-alter table members        enable row level security;
-alter table expenses       enable row level security;
-alter table expense_splits enable row level security;
-alter table settlements    enable row level security;
-revoke all on groups, members, expenses, expense_splits, settlements from anon, authenticated;
+alter table splitter.groups         enable row level security;
+alter table splitter.members        enable row level security;
+alter table splitter.expenses       enable row level security;
+alter table splitter.expense_splits enable row level security;
+alter table splitter.settlements    enable row level security;
+revoke all on all tables in schema splitter from public, anon, authenticated;
 
-drop function if exists create_group(text);
-drop function if exists get_group(uuid);
-drop function if exists save_group(uuid, integer, jsonb);
+drop function if exists public.splitter_create_group(text);
+drop function if exists public.splitter_get_group(uuid);
+drop function if exists public.splitter_save_group(uuid, integer, jsonb);
 
 -- Create an empty group and return its secret token.
-create function create_group(p_name text)
+create function public.splitter_create_group(p_name text)
 returns uuid
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path = splitter, pg_catalog as $$
 declare
   v_token uuid;
 begin
@@ -94,9 +108,9 @@ begin
 end $$;
 
 -- Return a group's transactions in the shape the app uses, or null for an unknown token.
-create function get_group(p_token uuid)
+create function public.splitter_get_group(p_token uuid)
 returns jsonb
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = splitter, pg_catalog as $$
   select jsonb_build_object(
     'groupName', g.name,
     'version',   g.version,
@@ -127,9 +141,9 @@ $$;
 
 -- Replace a group's transactions atomically. p_version must match the stored version,
 -- otherwise 'version_conflict' is raised and the app re-applies its change to fresh data.
-create function save_group(p_token uuid, p_version integer, p_group jsonb)
+create function public.splitter_save_group(p_token uuid, p_version integer, p_group jsonb)
 returns integer
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path = splitter, pg_catalog as $$
 declare
   g        groups;
   e        jsonb;
@@ -190,5 +204,7 @@ begin
   return g.version;
 end $$;
 
-revoke execute on function create_group(text), get_group(uuid), save_group(uuid, integer, jsonb) from public;
-grant  execute on function create_group(text), get_group(uuid), save_group(uuid, integer, jsonb) to anon, authenticated;
+revoke execute on function public.splitter_create_group(text), public.splitter_get_group(uuid),
+                            public.splitter_save_group(uuid, integer, jsonb) from public;
+grant  execute on function public.splitter_create_group(text), public.splitter_get_group(uuid),
+                            public.splitter_save_group(uuid, integer, jsonb) to anon, authenticated;
