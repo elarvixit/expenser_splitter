@@ -8,6 +8,6 @@
  * Leave both empty to run Splitter in local-only mode (data stays in this browser).
  */
 window.SPLITTER_CONFIG = {
-  supabaseUrl: '',      // e.g. 'https://abcdefghijkl.supabase.co'
-  supabaseAnonKey: '',  // e.g. 'sb_publishable_…' or the legacy 'eyJhbGciOi…' anon key
+  supabaseUrl: 'https://ikqlzopfhddygqekgsnu.supabase.co',
+  supabaseAnonKey: 'sb_publishable_CS8Un0wclUg7z3UqnOEoBQ_ujIpXTpL',
 };
