@@ -466,7 +466,11 @@
 
   // ---------- report ----------
   const failed = results.filter((r) => !r.ok);
-  if (typeof module === 'object' && module.exports) {
+  if (typeof module === 'object' && module.exports && process.env.NODE_TEST_CONTEXT) {
+    // under `node --test`: report every case to the built-in runner
+    const nodeTest = require('node:test');
+    for (const r of results) nodeTest(`${r.group} › ${r.name}`, () => { if (!r.ok) throw new Error(r.error); });
+  } else if (typeof module === 'object' && module.exports) {
     for (const r of results) console.log(`${r.ok ? '✓' : '✗'} ${r.group} › ${r.name}${r.ok ? '' : '\n    ' + r.error}`);
     console.log(`\n${results.length - failed.length}/${results.length} passed`);
     if (failed.length) process.exitCode = 1;

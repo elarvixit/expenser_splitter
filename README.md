@@ -14,8 +14,8 @@ src/remote.js                    tiny Supabase client (calls the splitter_* data
 config.js                        public Supabase URL + anon key (empty = local-only mode)
 supabase/schema.sql              tables + functions; paste into the Supabase SQL Editor
 supabase/examples/*.sql          adding people / expenses by hand
-tests/*.test.js                  unit tests (browser or Node)
-tests/index.html                 browser test runner
+tests/                           unit, database and browser tests (see Testing)
+tests/index.html                 the unit suites in a browser page
 serve.ps1                        tiny local static server (PowerShell)
 scripts/write-config.mjs         Vercel build step: config.js from environment variables
 vercel.json                      runs that step on deploy
@@ -27,8 +27,25 @@ vercel.json                      runs that step on deploy
 powershell -ExecutionPolicy Bypass -File serve.ps1
 ```
 
-Open http://localhost:5173 for the app and http://localhost:5173/tests/ for the tests.
-With Node installed you can also run `node tests/balances.test.js` and `node tests/categories.test.js`.
+Open http://localhost:5173 for the app and http://localhost:5173/tests/ for the unit tests in a browser.
+
+## Testing
+
+```
+npm install          # test tools only; the site itself needs nothing
+npm test             # unit + database + browser tests
+npm run coverage     # the same, plus one merged coverage report → coverage/index.html
+```
+
+| Layer | Where | Covers |
+|---|---|---|
+| Unit | `tests/*.test.js`, `tests/unit/` (Node's built-in runner) | money maths, categories, Supabase client, PDF, UI helpers |
+| Database | `tests/db/` (the real `schema.sql` in PGlite, a Postgres that runs in Node) | accounts, privacy, validation, conflicts, avatars, upgrades, example scripts |
+| Browser | `tests/e2e/` (Playwright + the installed Chrome, against `tests/e2e/server.mjs`) | every screen, two devices syncing, offline, phone layout, themes, PDF download |
+
+Every test case is listed in [tests/TEST-CASES.md](tests/TEST-CASES.md), generated from the test
+titles (`node tests/make-test-cases.mjs`). The browser tests run offline: the PDF libraries are served
+from `node_modules`, byte-identical to the pinned cdnjs files, so the integrity check still runs.
 
 ## Features
 
