@@ -1,19 +1,25 @@
 // Vercel build step: writes config.js from environment variables, if they are set.
-// If they aren't, the committed config.js is used unchanged.
+// Otherwise the committed config.js is used unchanged.
 //
 //   SUPABASE_URL       – Project URL, e.g. https://abcdefghijkl.supabase.co
 //   SUPABASE_ANON_KEY  – the publishable (sb_publishable_…) or legacy anon (eyJ…) key
 //
-// The NEXT_PUBLIC_… / SUPABASE_PUBLISHABLE_KEY names created by Vercel's Supabase
-// integration are accepted too. Secret / service_role keys are refused, because this
-// file is served to every visitor's browser.
+// Common alternative names (Vercel's Supabase integration, NEXT_PUBLIC_…, VITE_…) work too.
+// Secret / service_role keys are refused, because config.js is served to every browser.
 import fs from 'node:fs';
 
-const env = process.env;
-const url = env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '';
-const key =
-  env.SUPABASE_ANON_KEY || env.SUPABASE_PUBLISHABLE_KEY ||
-  env.NEXT_PUBLIC_SUPABASE_ANON_KEY || env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+const URL_NAMES = ['SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'VITE_SUPABASE_URL', 'PUBLIC_SUPABASE_URL'];
+const KEY_NAMES = [
+  'SUPABASE_ANON_KEY', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_KEY', 'SUPABASE_PUBLIC_KEY',
+  'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'NEXT_PUBLIC_SUPABASE_KEY',
+  'VITE_SUPABASE_ANON_KEY', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'PUBLIC_SUPABASE_ANON_KEY',
+];
+
+const clean = (v) => String(v || '').trim().replace(/^['"]|['"]$/g, '').trim();
+const pick = (names) => {
+  for (const name of names) if (clean(process.env[name])) return { name, value: clean(process.env[name]) };
+  return null;
+};
 
 function jwtRole(token) {
   try {
@@ -23,25 +29,36 @@ function jwtRole(token) {
   }
 }
 
-if (!url && !key) {
-  console.log('write-config: no Supabase environment variables set; using the committed config.js');
-  process.exit(0);
-}
-if (!url || !key) {
-  console.error('write-config: set both SUPABASE_URL and SUPABASE_ANON_KEY (or neither)');
-  process.exit(1);
-}
-if (!/^https:\/\/\S+$/.test(url)) {
-  console.error('write-config: SUPABASE_URL must be an https URL');
-  process.exit(1);
-}
-if (key.startsWith('sb_secret_') || (key.startsWith('eyJ') && jwtRole(key) !== 'anon')) {
-  console.error('write-config: refusing to publish a secret / service_role key. Use the publishable or anon key.');
+const url = pick(URL_NAMES);
+const key = pick(KEY_NAMES);
+
+// Names only (never values), to make misnamed variables easy to spot in the Vercel log.
+const seen = Object.keys(process.env).filter((n) => /SUPABASE/i.test(n)).sort();
+console.log(`write-config: Supabase-related variables present: ${seen.length ? seen.join(', ') : '(none)'}`);
+
+if (key && (key.value.startsWith('sb_secret_') || (key.value.startsWith('eyJ') && jwtRole(key.value) !== 'anon'))) {
+  console.error(`write-config: ${key.name} holds a SECRET / service_role key. Refusing to publish it to the browser.`);
+  console.error('write-config: use the publishable (sb_publishable_…) or anon key instead.');
   process.exit(1);
 }
 
+if (!url || !key) {
+  if (url || key) {
+    console.warn(`write-config: WARNING — found ${url ? url.name : key.name} but no ${url ? 'key (e.g. SUPABASE_ANON_KEY)' : 'URL (SUPABASE_URL)'}.`);
+    console.warn(`write-config: accepted URL names: ${URL_NAMES.join(', ')}`);
+    console.warn(`write-config: accepted key names: ${KEY_NAMES.join(', ')}`);
+  }
+  console.log('write-config: using the committed config.js');
+  process.exit(0);
+}
+
+if (!/^https:\/\/\S+$/.test(url.value)) {
+  console.warn(`write-config: WARNING — ${url.name} is not an https URL; using the committed config.js`);
+  process.exit(0);
+}
+
 const config = `// Generated at build time by scripts/write-config.mjs from Vercel environment variables.
-window.SPLITTER_CONFIG = ${JSON.stringify({ supabaseUrl: url.replace(/\/+$/, ''), supabaseAnonKey: key }, null, 2)};
+window.SPLITTER_CONFIG = ${JSON.stringify({ supabaseUrl: url.value.replace(/\/+$/, ''), supabaseAnonKey: key.value }, null, 2)};
 `;
 fs.writeFileSync(new URL('../config.js', import.meta.url), config);
-console.log(`write-config: config.js written for ${url}`);
+console.log(`write-config: config.js written from ${url.name} + ${key.name} (${url.value})`);
