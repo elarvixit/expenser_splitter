@@ -9,7 +9,8 @@
 
   function createRemote(config) {
     if (!config || !config.supabaseUrl || !config.supabaseAnonKey) return null;
-    const base = String(config.supabaseUrl).replace(/\/+$/, '') + '/rest/v1/rpc/';
+    // Accept the project URL with or without a trailing /rest/v1 (a common copy-paste).
+    const base = String(config.supabaseUrl).trim().replace(/\/+$/, '').replace(/\/rest\/v1$/i, '') + '/rest/v1/rpc/';
     const key = String(config.supabaseAnonKey);
     const headers = { 'Content-Type': 'application/json', apikey: key };
     // Legacy anon keys are JWTs and go in Authorization too; new sb_publishable_ keys must not.

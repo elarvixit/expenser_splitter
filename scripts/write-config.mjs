@@ -57,8 +57,12 @@ if (!/^https:\/\/\S+$/.test(url.value)) {
   process.exit(0);
 }
 
+// The project URL only: drop trailing slashes and an accidental /rest/v1 suffix.
+const projectUrl = url.value.replace(/\/+$/, '').replace(/\/rest\/v1$/i, '');
+if (projectUrl !== url.value) console.warn(`write-config: note — ${url.name} should be just ${projectUrl} (fixed automatically)`);
+
 const config = `// Generated at build time by scripts/write-config.mjs from Vercel environment variables.
-window.SPLITTER_CONFIG = ${JSON.stringify({ supabaseUrl: url.value.replace(/\/+$/, ''), supabaseAnonKey: key.value }, null, 2)};
+window.SPLITTER_CONFIG = ${JSON.stringify({ supabaseUrl: projectUrl, supabaseAnonKey: key.value }, null, 2)};
 `;
 fs.writeFileSync(new URL('../config.js', import.meta.url), config);
 console.log(`write-config: config.js written from ${url.name} + ${key.name} (${url.value})`);
