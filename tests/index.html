@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Halve Tests</title>
+  <title>Splitter Tests</title>
   <style>
     :root { --orange: #EA580C; --ink: #1C1512; --muted: #7C6F66; --line: #F1E4D8; --ok: #EA580C; --bad: #B42318; }
     body { margin: 0; background: #FFFBF7; color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
@@ -45,7 +45,7 @@
       if (!r.ok) { const pre = document.createElement('pre'); pre.textContent = r.error; body.appendChild(pre); }
       row.append(mark, body); out.appendChild(row);
     }
-    document.title = (failed ? '✗ ' : '✓ ') + 'Halve Tests';
+    document.title = (failed ? '✗ ' : '✓ ') + 'Splitter Tests';
   </script>
 </body>
 </html>

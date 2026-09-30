@@ -1,6 +1,7 @@
 /*
- * Halve — UI layer. Only transactions (members, expenses, settlements) are
- * stored. Every render recomputes balances with SplitCore.calculateBalances.
+ * Splitter — UI layer. Each group stores only its transactions (members,
+ * expenses, settlements). Every render recomputes the active group's balances
+ * with SplitCore.calculateBalances.
  */
 (function () {
   'use strict';
@@ -16,41 +17,72 @@
     ValidationError,
   } = window.SplitCore;
 
-  const STORE_KEY = 'halve:v1';
+  const STORE_KEY = 'splitter:v2';
+  const LEGACY_KEY = 'halve:v1'; // single-group data from the first version
   const $ = (sel) => document.querySelector(sel);
 
   // ---------- state ----------
+  // store = { activeGroupId, groups: [{ id, groupName, members, expenses, settlements, createdAt }] }
 
-  function emptyState() {
-    return { groupName: 'Our group', members: [], expenses: [], settlements: [] };
+  function newGroup(name) {
+    return { id: uid('g'), groupName: name || 'New group', members: [], expenses: [], settlements: [], createdAt: new Date().toISOString() };
   }
 
-  function load() {
+  function isValidGroup(g) {
+    try {
+      return !!g && typeof g.id === 'string' && Array.isArray(g.members) && Array.isArray(g.expenses) &&
+        Array.isArray(g.settlements) && !!calculateBalances(g); // rejects corrupted ledgers
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function loadStore() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         const s = JSON.parse(raw);
-        if (s && Array.isArray(s.members) && Array.isArray(s.expenses) && Array.isArray(s.settlements)) {
-          calculateBalances(s); // reject corrupted data
-          return s;
+        const groups = (s && Array.isArray(s.groups) ? s.groups : []).filter(isValidGroup);
+        if (groups.length) {
+          const active = groups.some((g) => g.id === s.activeGroupId) ? s.activeGroupId : groups[0].id;
+          return { activeGroupId: active, groups };
         }
       }
-    } catch (_) { /* fall through to empty */ }
-    return emptyState();
+      const legacy = localStorage.getItem(LEGACY_KEY);
+      if (legacy) {
+        const g = Object.assign(newGroup(), JSON.parse(legacy));
+        if (isValidGroup(g)) return { activeGroupId: g.id, groups: [g] };
+      }
+    } catch (_) { /* fall through to a fresh store */ }
+    const g = newGroup('My group');
+    return { activeGroupId: g.id, groups: [g] };
   }
 
   function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (_) { /* storage unavailable */ }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch (_) { /* storage unavailable */ }
   }
 
-  let state = load();
+  let store = loadStore();
+  let state = store.groups.find((g) => g.id === store.activeGroupId); // the active group
 
-  /** Apply a change to a copy of the state; only keep it if the ledger is still valid. */
-  function commit(mutate) {
-    const next = JSON.parse(JSON.stringify(state));
+  /** Apply a change to a copy of a group; only keep it if the ledger is still valid. */
+  function commit(mutate, groupId = state.id) {
+    const i = store.groups.findIndex((g) => g.id === groupId);
+    if (i < 0) return;
+    const next = JSON.parse(JSON.stringify(store.groups[i]));
     mutate(next);
     calculateBalances(next); // throws ValidationError if the change breaks the ledger
-    state = next;
+    store.groups[i] = next;
+    if (next.id === state.id) state = next;
+    save();
+    render();
+  }
+
+  function switchGroup(id) {
+    const g = store.groups.find((x) => x.id === id);
+    if (!g) return;
+    store.activeGroupId = id;
+    state = g;
     save();
     render();
   }
@@ -102,7 +134,10 @@
       btn.onclick = () => { action.run(); el.remove(); };
       el.appendChild(btn);
     }
+    // Modal dialogs sit in the top layer, so show the toast inside the open one.
     const host = $('#toasts');
+    const openDialog = document.querySelector('dialog[open]');
+    (openDialog || document.body).appendChild(host);
     host.replaceChildren(el);
     setTimeout(() => el.remove(), action ? 6000 : 3200);
   }
@@ -118,6 +153,7 @@
     renderDebts(debts);
     renderMembers();
     renderActivity();
+    renderGroupButton();
     $('#btn-add').disabled = state.members.length === 0;
     $('#btn-pay').disabled = state.members.length < 2;
   }
@@ -125,6 +161,8 @@
   function renderHero(balances, transfers) {
     const input = $('#group-name');
     if (document.activeElement !== input) input.value = state.groupName;
+    const n = store.groups.length;
+    $('#hero-eyebrow').textContent = n > 1 ? `Group ${store.groups.indexOf(state) + 1} of ${n}` : 'Group';
     const spent = state.expenses.reduce((a, e) => a + e.amount, 0);
     const outstanding = Object.values(balances).reduce((a, v) => a + (v > 0 ? v : 0), 0);
     $('#hero-sub').textContent = state.members.length
@@ -304,7 +342,7 @@
   });
 
   $('#group-name').addEventListener('change', (ev) => {
-    const name = ev.target.value.trim() || 'Our group';
+    const name = ev.target.value.trim() || 'Untitled group';
     commit((s) => { s.groupName = name; });
   });
   $('#group-name').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ev.target.blur(); });
@@ -324,12 +362,13 @@
     const index = state[collection].findIndex((x) => x.id === id);
     if (index < 0) return;
     const removed = state[collection][index];
+    const groupId = state.id;
     commit((s) => { s[collection].splice(index, 1); });
     toast(message, {
       label: 'Undo',
       run: () => {
         try {
-          commit((s) => { s[collection].splice(Math.min(index, s[collection].length), 0, removed); });
+          commit((s) => { s[collection].splice(Math.min(index, s[collection].length), 0, removed); }, groupId);
         } catch (err) {
           toast(humanError(err));
         }
@@ -637,17 +676,165 @@
       ],
       settlements: [{ id: uid('s'), from: ids.dev, to: ids.asha, amount: 300000, note: 'UPI', createdAt: day(24, 11) }],
     };
-    const previous = state;
-    commit((s) => Object.assign(s, demo));
-    if (previous.members.length) {
-      toast('Demo trip loaded', { label: 'Undo', run: () => commit((s) => Object.assign(s, previous)) });
-    } else {
-      toast('Demo trip loaded');
+    // The demo becomes its own group; it replaces the current group only if that one is still empty.
+    const group = Object.assign(newGroup(), demo);
+    calculateBalances(group);
+    const i = store.groups.indexOf(state);
+    if (!state.members.length && !state.expenses.length && !state.settlements.length) store.groups[i] = group;
+    else store.groups.push(group);
+    switchGroup(group.id);
+    toast('Demo trip added to your groups');
+  }
+
+  // ---------- groups ----------
+
+  const groupsDialog = $('#groups-dialog');
+  let renamingId = null;
+
+  function groupSummary(g) {
+    const spent = g.expenses.reduce((a, e) => a + e.amount, 0);
+    const people = plural(g.members.length, 'person').replace('persons', 'people');
+    return `${people} · ${plural(g.expenses.length, 'expense')}${spent ? ' · ' + formatPaise(spent) : ''}`;
+  }
+
+  function groupInitials(name) {
+    const words = name.trim().split(/[\s,]+/).filter(Boolean);
+    return (words.length > 1 ? words[0][0] + words[1][0] : (words[0] || '?').slice(0, 2)).toUpperCase();
+  }
+
+  function renderGroupButton() {
+    $('#groups-current').textContent = state.groupName;
+    $('#groups-count').textContent = store.groups.length;
+  }
+
+  function renderGroupList() {
+    const PEN = '<svg viewBox="0 0 20 20"><path d="M12.5 4.5l3 3L7 16H4v-3z"/></svg>';
+    const BIN = '<svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2m-6 0 .7 10h6.6L14 6"/></svg>';
+    $('#group-list').innerHTML = store.groups
+      .map((g, i) => {
+        const id = esc(g.id);
+        const name = esc(g.groupName);
+        const active = g.id === state.id;
+        const [bg, fg] = AVATAR_TONES[i % AVATAR_TONES.length];
+        const badge = `<span class="group-badge" style="background:${bg};color:${fg}">${esc(groupInitials(g.groupName))}</span>`;
+        const pill = active ? '<span class="pill">Current</span>' : '';
+        const body =
+          g.id === renamingId
+            ? `<div class="group-pick">${badge}<span class="group-info">
+                 <input class="group-rename" data-rename-input="${id}" value="${name}" maxlength="40" aria-label="Group name">
+                 <small>${groupSummary(g)}</small></span></div>`
+            : `<button class="group-pick" type="button" data-pick="${id}">${badge}<span class="group-info">
+                 <strong>${name}</strong><small>${groupSummary(g)}</small></span>${pill}</button>`;
+        return `<li class="group-row${active ? ' active' : ''}">${body}
+          <div class="group-tools">
+            <button class="icon-btn" type="button" data-rename="${id}" aria-label="Rename ${name}">${PEN}</button>
+            <button class="icon-btn" type="button" data-delete-group="${id}" aria-label="Delete ${name}">${BIN}</button>
+          </div></li>`;
+      })
+      .join('');
+    const input = $('#group-list [data-rename-input]');
+    if (input) {
+      input.focus();
+      input.select();
     }
+  }
+
+  function openGroups() {
+    renamingId = null;
+    renderGroupList();
+    groupsDialog.showModal();
+  }
+
+  function finishRename(keep) {
+    const input = $('#group-list [data-rename-input]');
+    const id = renamingId;
+    if (!id || !input) return;
+    renamingId = null; // set first: re-rendering fires focusout on the old input
+    const name = input.value.trim().replace(/\s+/g, ' ');
+    if (keep && name) commit((g) => { g.groupName = name; }, id);
+    renderGroupList();
+  }
+
+  function deleteGroup(id) {
+    const index = store.groups.findIndex((g) => g.id === id);
+    if (index < 0) return;
+    const removed = store.groups[index];
+    store.groups.splice(index, 1);
+    let placeholder = null;
+    if (!store.groups.length) {
+      placeholder = newGroup('My group');
+      store.groups.push(placeholder);
+    }
+    if (state.id === id) switchGroup(store.groups[Math.min(index, store.groups.length - 1)].id);
+    else { save(); render(); }
+    renderGroupList();
+    toast(`${removed.groupName} deleted`, {
+      label: 'Undo',
+      run: () => {
+        const p = placeholder && store.groups.find((g) => g.id === placeholder.id);
+        if (p && !p.members.length && !p.expenses.length && !p.settlements.length) store.groups.splice(store.groups.indexOf(p), 1);
+        store.groups.splice(Math.min(index, store.groups.length), 0, removed);
+        switchGroup(removed.id);
+        if (groupsDialog.open) renderGroupList();
+      },
+    });
+  }
+
+  $('#group-list').addEventListener('click', (ev) => {
+    const pick = ev.target.closest('[data-pick]');
+    const rename = ev.target.closest('[data-rename]');
+    const del = ev.target.closest('[data-delete-group]');
+    if (pick) {
+      switchGroup(pick.dataset.pick);
+      groupsDialog.close();
+    } else if (rename) {
+      if (renamingId === rename.dataset.rename) return finishRename(true);
+      renamingId = rename.dataset.rename;
+      renderGroupList();
+    } else if (del) {
+      deleteGroup(del.dataset.deleteGroup);
+    }
+  });
+
+  $('#group-list').addEventListener('keydown', (ev) => {
+    if (!ev.target.dataset.renameInput) return;
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      finishRename(true);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault(); // keep the dialog open; just cancel the rename
+      ev.stopPropagation();
+      finishRename(false);
+    }
+  });
+
+  $('#group-list').addEventListener('focusout', (ev) => {
+    if (ev.target.dataset.renameInput && !(ev.relatedTarget && ev.relatedTarget.closest('[data-rename]'))) finishRename(true);
+  });
+
+  $('#new-group-form').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const input = $('#new-group-name');
+    const name = input.value.trim().replace(/\s+/g, ' ') || 'New group';
+    const g = newGroup(name);
+    store.groups.push(g);
+    switchGroup(g.id);
+    input.value = '';
+    groupsDialog.close();
+    toast(`${name} created — add the people first`);
+    setTimeout(() => $('#member-name').focus(), 50);
+  });
+
+  groupsDialog.addEventListener('click', (ev) => {
+    if (ev.target === groupsDialog || ev.target.closest('[data-close]')) groupsDialog.close();
+  });
+  for (const d of [exDialog, payDialog, groupsDialog]) {
+    d.addEventListener('close', () => document.body.appendChild($('#toasts')));
   }
 
   document.addEventListener('click', (ev) => { if (ev.target.closest('[data-demo]')) loadDemo(); });
   $('#btn-demo').addEventListener('click', loadDemo);
+  $('#btn-groups').addEventListener('click', openGroups);
   $('#btn-add').addEventListener('click', () => openExpense(null));
   $('#btn-pay').addEventListener('click', () => openPayment(null));
 

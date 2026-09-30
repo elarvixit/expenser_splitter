@@ -1,5 +1,5 @@
 /*
- * Halve — balance calculation core.
+ * Splitter — balance calculation core.
  *
  * Everything here is pure: no I/O, no stored state, inputs are never mutated.
  * All money is integer paise (₹1 = 100 paise). Balances are never persisted;

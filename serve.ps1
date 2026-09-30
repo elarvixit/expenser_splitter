@@ -21,16 +21,22 @@ try {
     if ($path -eq '' -or $path.EndsWith('/')) { $path += 'index.html' }
     $file = [IO.Path]::GetFullPath((Join-Path $root $path))
     $res = $ctx.Response
-    if ($file.StartsWith($root) -and (Test-Path $file -PathType Leaf)) {
-      $bytes = [IO.File]::ReadAllBytes($file)
-      $ext = [IO.Path]::GetExtension($file).ToLower()
-      $res.ContentType = $(if ($types.ContainsKey($ext)) { $types[$ext] } else { 'application/octet-stream' })
-      $res.Headers.Add('Cache-Control', 'no-store')
-      $res.OutputStream.Write($bytes, 0, $bytes.Length)
-    } else {
-      $res.StatusCode = 404
+    try {
+      if ($file.StartsWith($root) -and (Test-Path $file -PathType Leaf)) {
+        $bytes = [IO.File]::ReadAllBytes($file)
+        $ext = [IO.Path]::GetExtension($file).ToLower()
+        $res.ContentType = $(if ($types.ContainsKey($ext)) { $types[$ext] } else { 'application/octet-stream' })
+        $res.Headers.Add('Cache-Control', 'no-store')
+        $res.ContentLength64 = $bytes.Length
+        if ($ctx.Request.HttpMethod -ne 'HEAD') { $res.OutputStream.Write($bytes, 0, $bytes.Length) }
+      } else {
+        $res.StatusCode = 404
+      }
+    } catch {
+      Write-Host "Request failed: $($_.Exception.Message)"
+    } finally {
+      $res.Close()
     }
-    $res.Close()
   }
 } finally {
   $listener.Stop()

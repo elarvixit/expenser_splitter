@@ -1,4 +1,4 @@
-# Halve — expense splitter
+# Splitter — expense splitter
 
 A static web app for splitting group expenses to the paisa. No build step, no dependencies.
 
@@ -21,8 +21,12 @@ If Node is installed you can also run `node tests/balances.test.js`.
 
 ## Data model
 
-Only transactions are stored (in `localStorage`). Balances are never stored; every render calls
-`calculateBalances({ members, expenses, settlements })`.
+You can keep several groups (trips, flatmates, …). Use the **Groups** button in the header to
+create, switch, rename or delete them. Each group has its own members, expenses and payments.
+
+Only transactions are stored (in `localStorage` under `splitter:v2`, as
+`{ activeGroupId, groups: [...] }`). Balances are never stored; every render calls
+`calculateBalances({ members, expenses, settlements })` for the active group.
 
 - Expense: `{ id, paidBy, amount, splits: [{ memberId, amount }] }`, where all amounts are integer paise
 - Settlement: `{ id, from, to, amount }`, meaning `from` handed `to` real money
