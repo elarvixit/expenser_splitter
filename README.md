@@ -11,6 +11,7 @@ supabase/schema.sql              database tables + functions; paste into the Sup
 tests/balances.test.js           unit tests (browser or Node)
 tests/index.html                 browser test runner
 serve.ps1                        tiny local static server (PowerShell)
+scripts/write-config.mjs         Vercel build step: config.js from environment variables
 ```
 
 ## Run
@@ -24,29 +25,39 @@ If Node is installed you can also run `node tests/balances.test.js`.
 
 ## Supabase (sync and share by link)
 
-With `config.js` left empty, Splitter keeps data only in the browser. To sync across devices
+With no Supabase settings, Splitter keeps data only in the browser. To sync across devices
 and share groups:
 
 1. In your Supabase project, open **SQL Editor → New query**, paste all of
-   `supabase/schema.sql` and click **Run**. It's safe to run again later. It works in a new project
-   or in a shared team project: all tables go in a private `splitter` schema (not exposed through
-   the API), and the only additions to `public` are three `splitter_`-prefixed functions. Nothing
-   else in the project is changed. The top of the file has the two commands to remove it.
-2. Copy the **Project URL** and the **anon / publishable key** from **Project Settings → API**
-   into `config.js`, then commit and push. Vercel redeploys automatically, and no Vercel
-   environment variables are needed.
-3. Open the site. Your existing groups upload automatically. **Share link** copies a URL like
+   `supabase/schema.sql` and click **Run**. It's safe to run again. It works in a new project
+   or in a shared team project, because everything it creates is prefixed:
+   - tables: `tharun_expense_splitter_groups`, `_members`, `_expenses`, `_expense_splits`, `_settlements`
+   - functions: `splitter_create_group`, `splitter_get_group`, `splitter_save_group`
+
+   Nothing else in the project is changed. The top of the file has the commands to remove it.
+   Data saved by the first version (tables in the `splitter` schema) is copied over automatically.
+2. Give the site the **Project URL** and the **publishable / anon key** (Project Settings → API).
+   Use either of these:
+   - **Vercel environment variables** (Project → Settings → Environment Variables):
+     `SUPABASE_URL` and `SUPABASE_ANON_KEY`, then redeploy. On each deploy,
+     `scripts/write-config.mjs` writes them into `config.js`. The names created by Vercel's Supabase
+     integration (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+     `…_PUBLISHABLE_KEY`) also work. Secret / service_role keys are refused.
+   - **`config.js`**: put them in the file directly. This is also what local development uses.
+3. Open the site. Existing local groups upload automatically. **Share link** copies a URL like
    `https://…/#g=<secret>`, and anyone who opens it can view and edit that group.
 
 How it stays safe with a public key: the tables have Row Level Security on with no policies, and
-the anon role has no table privileges. The browser can only call `splitter_create_group`,
-`splitter_get_group` and `splitter_save_group`, and each one needs the group's secret token. Never put the `service_role`
-key in `config.js`.
+the anon role has no table privileges. The browser can only call the three `splitter_…`
+functions, and each one needs the group's secret token. Never use the `service_role` / secret key.
 
-Edits apply instantly on the device, then sync. `save_group` checks a version number. If
-someone else saved in between, the app fetches the latest copy, replays your unsaved changes on
+Edits apply instantly on the device, then sync. `splitter_save_group` checks a version number.
+If someone else saved in between, the app fetches the latest copy, replays your unsaved changes on
 top of it and saves again. Other people's changes are picked up every 15 seconds and whenever you
 return to the tab. Removing a group from the Groups list only removes it from that device.
+
+To delete a group from the database: `delete from tharun_expense_splitter_groups where token = '<token>';`
+(its members, expenses and payments are removed with it).
 
 ## Data model
 
