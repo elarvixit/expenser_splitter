@@ -91,6 +91,72 @@
     });
   });
 
+  group('daily spend', () => {
+    const trip = [
+      exp('Hotel booking', 1250000, '2026-09-26T10:00:00+05:30'),
+      exp('Cab to the airport', 185000, '2026-09-26T07:00:00+05:30'),
+      exp('Movie tickets', 144000, '2026-09-27T18:00:00+05:30'),
+      exp('Groceries', 219999, '2026-09-27T12:00:00+05:30'),
+      exp('Petrol', 200000, '2026-09-28T09:00:00+05:30'),
+      exp('August rent', 900000, '2026-08-05T10:00:00+05:30'),
+    ];
+    test('month labels carry the full year (not mistakable for a day)', () => {
+      assert.equal(/2026/.test(C.monthLabel('2026-09')), true, C.monthLabel('2026-09'));
+    });
+    test('one bucket per day from the first to the last day with spend in that month', () => {
+      const d = C.dailySpend(trip, '2026-09');
+      assert.deepEqual(d.months.map((b) => b.key), ['2026-09-26', '2026-09-27', '2026-09-28']);
+      assert.deepEqual(d.months.map((b) => b.total), [1435000, 363999, 200000]);
+      assert.equal(d.total, 1435000 + 363999 + 200000, 'excludes other months');
+      assert.equal(d.series.reduce((a, s) => a + s.total, 0), d.total, 'series add up');
+    });
+    test('days of the month add up to that month in the monthly view', () => {
+      const monthTotal = monthlySpend(trip).months.find((m) => m.key === '2026-09').total;
+      assert.equal(C.dailySpend(trip, '2026-09').total, monthTotal);
+    });
+    test('gap days are filled with zero; a month with no spend is empty', () => {
+      const d = C.dailySpend([exp('A', 100, '2026-09-01T12:00:00'), exp('B', 200, '2026-09-04T12:00:00')], '2026-09');
+      assert.deepEqual(d.months.map((b) => b.total), [100, 0, 0, 200]);
+      assert.deepEqual(C.dailySpend(trip, '2026-01'), { months: [], series: [], total: 0 });
+    });
+  });
+
+  group('spend by person', () => {
+    const Core = isNode ? require('../src/balances.js') : root.SplitCore;
+    const people = ['a', 'b', 'c'].map((id) => ({ id, name: id.toUpperCase() }));
+    const g = {
+      members: people,
+      expenses: [
+        { paidBy: 'a', amount: 900, splits: Core.splitEqually(900, ['a', 'b', 'c']) },
+        { paidBy: 'b', amount: 101, splits: Core.splitEqually(101, ['a', 'b']) },
+      ],
+      settlements: [{ from: 'c', to: 'a', amount: 300 }],
+    };
+    test('paid = out of pocket; settlements are not spending', () => {
+      const r = C.spendByPerson(g, 'paid');
+      assert.deepEqual(r.items.map((i) => [i.name, i.total]), [['A', 900], ['B', 101]]);
+      assert.equal(r.total, 1001, 'equals total spent');
+    });
+    test('share = each person’s portion; shares add up to total spent', () => {
+      const r = C.spendByPerson(g, 'share');
+      assert.deepEqual(r.items.map((i) => [i.name, i.total]), [['A', 351], ['B', 350], ['C', 300]]);
+      assert.equal(r.total, 1001);
+    });
+    test('colour follows the person (member order), not the amount', () => {
+      const paid = C.spendByPerson(g, 'paid'); const share = C.spendByPerson(g, 'share');
+      assert.equal(paid.items[1].color, share.items[1].color, 'B keeps its colour across modes');
+      assert.equal(share.items[2].color, C.PERSON_COLORS[2]);
+    });
+    test('more than 8 people: the rest fold into one slice', () => {
+      const many = Array.from({ length: 10 }, (_, i) => ({ id: 'p' + i, name: 'P' + i }));
+      const big = { members: many, expenses: many.map((m) => ({ paidBy: m.id, amount: 100, splits: [{ memberId: m.id, amount: 100 }] })), settlements: [] };
+      const r = C.spendByPerson(big, 'paid');
+      assert.equal(r.items.length, 8);
+      assert.deepEqual([r.items[7].name, r.items[7].total], ['3 others', 300]);
+      assert.equal(r.total, 1000);
+    });
+  });
+
   group('custom categories', () => {
     const expenses = [
       exp('Printer ink', 500, '2026-09-01T10:00:00Z', 'Office'),

@@ -491,6 +491,13 @@ div.group-pick { cursor: default; }
 .chart-col { transition: opacity .15s; }
 .chart-col.dim { opacity: .35; }
 .chart-hit { fill: transparent; cursor: default; outline: none; }
+.chart-hit.selectable { cursor: pointer; }
+.link-btn {
+  margin-top: 6px; padding: 4px 0; border: 0; background: none; cursor: pointer;
+  color: var(--orange-700); font-weight: 700; font-size: 13px;
+}
+.link-btn:hover { text-decoration: underline; }
+.link-btn:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 6px; }
 .chart-hit:focus-visible { stroke: var(--orange-400); stroke-width: 2; }
 .chart-tooltip {
   position: absolute; z-index: 2; min-width: 150px; padding: 10px 12px; border-radius: 12px; pointer-events: none;
@@ -508,6 +515,21 @@ div.group-pick { cursor: default; }
 .legend-name { color: var(--ink-2); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .legend-value { margin-left: auto; color: var(--ink); font-weight: 600; }
 .legend-share { color: var(--muted); font-size: 12px; min-width: 34px; text-align: right; }
+.donut-layout { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 18px 24px; }
+.donut-wrap { position: relative; width: 176px; flex: none; }
+.donut-svg { display: block; width: 100%; height: auto; overflow: visible; fill: currentColor; stroke: none; }
+.donut-slice { stroke: var(--card); stroke-width: 2px; stroke-linejoin: round; transition: opacity .15s; outline: none; cursor: default; }
+.donut-slice.dim { opacity: .35; }
+.donut-slice:focus-visible { stroke: var(--orange-400); stroke-width: 3px; }
+.donut-total { fill: var(--ink); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.donut-caption { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.donut-tooltip { min-width: 120px; white-space: nowrap; }
+.tt-sub { color: var(--muted); font-size: 11.5px; white-space: normal; max-width: 180px; }
+/* sits beside the donut when there's room for full names, otherwise wraps below it */
+.donut-legend { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.donut-legend li { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; }
+@media (max-width: 420px) { .donut-layout { flex-direction: column; align-items: stretch; } .donut-wrap { align-self: center; } }
+
 .chart-table { margin-top: 12px; font-size: 13px; }
 .chart-table summary { cursor: pointer; color: var(--orange-700); font-weight: 600; font-size: 12.5px; width: max-content; }
 .table-scroll { overflow-x: auto; margin-top: 8px; }

@@ -37,9 +37,13 @@ With Node installed you can also run `node tests/balances.test.js` and `node tes
 - **Categories:** Food, Travel, Stay, Shopping, Entertainment, Bills, Other, or your own. Older
   expenses without one get a guess from their description ("Biryani" → Food).
 - **Spending chart:** monthly spend stacked by category, for the open group or all your groups,
-  with a legend, hover/focus tooltips and a table view. Expenses have a date, so past months can
-  be entered.
-- **PDF statement:** **Export PDF** downloads the open group's balances, settle-up plan,
+  with a legend, hover/focus tooltips and a table view. Tap a month to see it day by day. Expenses
+  have a date, so past months can be entered.
+- **Who spent what:** a donut of each person’s spending in the open group. **Paid** is out of
+  their own pocket; **Share** is their portion of the expenses. Payments between members are not
+  counted as spending.
+- **PDF statement:** **Export PDF** (in the orange banner), or the download icon next to any group
+  in the **Groups** list, downloads the open group's balances, settle-up plan,
   spending by category and month, every expense and every payment. The PDF fonts have no ₹ sign,
   so amounts there read "Rs.".
 

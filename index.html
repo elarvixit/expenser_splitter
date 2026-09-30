@@ -91,6 +91,7 @@
             <div>
               <h2 id="h-spend">Spending</h2>
               <p class="card-sub" id="spend-sub">Monthly, by category</p>
+              <button class="link-btn" id="spend-back" type="button" hidden>← All months</button>
             </div>
             <div class="segmented segmented-sm" role="radiogroup" aria-label="Chart scope">
               <label><input type="radio" name="spend-scope" value="group" checked><span>This group</span></label>
@@ -137,6 +138,20 @@
             </div>
           </div>
           <ul class="activity" id="activity"></ul>
+        </section>
+
+        <section class="card" aria-labelledby="h-people-spend">
+          <div class="card-head">
+            <div>
+              <h2 id="h-people-spend">Who spent what</h2>
+              <p class="card-sub" id="people-spend-sub">Out of pocket, per person</p>
+            </div>
+            <div class="segmented segmented-sm" role="radiogroup" aria-label="Measure">
+              <label><input type="radio" name="people-mode" value="paid" checked><span>Paid</span></label>
+              <label><input type="radio" name="people-mode" value="share"><span>Share</span></label>
+            </div>
+          </div>
+          <div id="people-chart"></div>
         </section>
       </div>
     </div>

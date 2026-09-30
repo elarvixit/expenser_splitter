@@ -143,6 +143,7 @@
     if (!g) return;
     store.activeGroupId = id;
     state = g;
+    spendMonth = null; // the day-by-day view belongs to the group it was opened in
     save();
     render();
     updateHash();
@@ -522,7 +523,7 @@
     renderGroupButton();
     renderSyncStatus();
     renderSpending();
-    $('#btn-export').disabled = state.members.length === 0;
+    renderPeopleSpend();
     $('#btn-add').disabled = state.members.length === 0;
     $('#btn-pay').disabled = state.members.length < 2;
   }
@@ -641,19 +642,53 @@
   // ---------- spending chart ----------
 
   let chartWidth = 0;
+  let spendMonth = null; // a month key ('2026-09') when showing that month day by day
+
   function renderSpending() {
     const scope = (document.querySelector('input[name=spend-scope]:checked') || {}).value || 'group';
     const expenses = scope === 'all' ? store.groups.flatMap((g) => g.expenses) : state.expenses;
-    const summary = Cat.monthlySpend(expenses);
+    const monthly = Cat.monthlySpend(expenses);
+    if (spendMonth && !monthly.months.some((m) => m.key === spendMonth && m.total > 0)) spendMonth = null;
+    const summary = spendMonth ? Cat.dailySpend(expenses, spendMonth) : monthly;
+    const who = scope === 'all' ? (store.groups.length > 1 ? `All ${store.groups.length} groups` : 'All groups') : 'This group';
     const n = summary.months.length;
-    $('#spend-sub').textContent = n
-      ? `${scope === 'all' ? (store.groups.length > 1 ? `All ${store.groups.length} groups` : 'All groups') : 'This group'} ·${summary.months[0].label}${n > 1 ? ` – ${summary.months[n - 1].label}` : ''} · ${formatPaise(summary.total)}`
-      : 'Monthly, by category';
+    if (spendMonth) {
+      $('#spend-sub').textContent = `${who} · ${Cat.monthLabel(spendMonth)} by day · ${formatPaise(summary.total)}`;
+    } else {
+      $('#spend-sub').textContent = n
+        ? `${who} · ${summary.months[0].label}${n > 1 ? ` – ${summary.months[n - 1].label}` : ''} · ${formatPaise(summary.total)} · tap a month to see its days`
+        : 'Monthly, by category';
+    }
+    $('#spend-back').hidden = !spendMonth;
     const box = $('#spend-chart');
     chartWidth = box.clientWidth;
-    window.SplitCharts.renderSpending(box, summary, { formatMoney: (p) => formatPaise(p) });
+    window.SplitCharts.renderSpending(box, summary, {
+      formatMoney: (p) => formatPaise(p),
+      bucketName: spendMonth ? 'Day' : 'Month',
+      onSelect: spendMonth ? null : (month) => { spendMonth = month.key; renderSpending(); },
+    });
   }
 
+  $('#spend-back').addEventListener('click', () => { spendMonth = null; renderSpending(); });
+
+  // ---------- who spent what (donut) ----------
+
+  function renderPeopleSpend() {
+    const mode = (document.querySelector('input[name=people-mode]:checked') || {}).value || 'paid';
+    const data = Cat.spendByPerson(state, mode);
+    $('#people-spend-sub').textContent = mode === 'share'
+      ? 'Each person’s portion of the expenses'
+      : 'Out of their own pocket (payments between you are not counted)';
+    window.SplitCharts.renderDonut($('#people-chart'), data, {
+      formatMoney: (p) => formatPaise(p),
+      title: mode === 'share' ? 'Share of expenses' : 'Paid out of pocket',
+      centerLabel: mode === 'share' ? 'shared' : 'paid',
+      emptyTitle: state.members.length ? 'No expenses yet' : 'No one here yet',
+      emptyText: 'Add an expense to see how much each person spent.',
+    });
+  }
+
+  document.querySelectorAll('input[name=people-mode]').forEach((r) => r.addEventListener('change', renderPeopleSpend));
   document.querySelectorAll('input[name=spend-scope]').forEach((r) => r.addEventListener('change', renderSpending));
   if (window.ResizeObserver) {
     new ResizeObserver(() => { if (Math.abs($('#spend-chart').clientWidth - chartWidth) > 8) renderSpending(); }).observe($('#spend-chart'));
@@ -661,13 +696,17 @@
 
   // ---------- PDF statement ----------
 
-  $('#btn-export').addEventListener('click', async () => {
-    const btn = $('#btn-export');
-    if (!state.members.length) return toast('Add people and expenses first');
-    btn.disabled = true;
+  let exporting = false;
+
+  /** Download a group's statement as a PDF (from the hero button or the Groups list). */
+  async function exportStatement(group) {
+    if (exporting) return;
+    if (!group || group.loading) return toast('That group is still loading — try again in a moment');
+    if (!group.members.length) return toast(`Add people and expenses to ${group.groupName} first`);
+    exporting = true;
     toast('Preparing your statement…');
     try {
-      const name = await window.SplitStatement.download(state, {
+      const name = await window.SplitStatement.download(group, {
         calculateBalances, suggestSettlements, formatPaise,
         categoryOf: Cat.categoryOf, monthlySpend: Cat.monthlySpend,
       });
@@ -676,9 +715,11 @@
       console.error(err);
       toast(err && /PDF library/.test(err.message) ? err.message : 'Could not create the PDF');
     } finally {
-      btn.disabled = false;
+      exporting = false;
     }
-  });
+  }
+
+  $('#btn-export').addEventListener('click', () => exportStatement(state));
 
   function dateBadge(iso) {
     const d = new Date(iso);
@@ -1195,6 +1236,7 @@
   function renderGroupList() {
     const PEN = '<svg viewBox="0 0 20 20"><path d="M12.5 4.5l3 3L7 16H4v-3z"/></svg>';
     const BIN = '<svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2m-6 0 .7 10h6.6L14 6"/></svg>';
+    const PDF = '<svg viewBox="0 0 20 20"><path d="M10 3v9m-4-4 4 4 4-4M4 14v2.5h12V14"/></svg>';
     $('#group-list').innerHTML = store.groups
       .map((g, i) => {
         const id = esc(g.id);
@@ -1212,6 +1254,7 @@
                  <strong>${name}</strong><small>${groupSummary(g)}</small></span>${pill}</button>`;
         return `<li class="group-row${active ? ' active' : ''}">${body}
           <div class="group-tools">
+            <button class="icon-btn" type="button" data-export-group="${id}" aria-label="Download statement (PDF) for ${name}" title="Download statement (PDF)">${PDF}</button>
             <button class="icon-btn" type="button" data-rename="${id}" aria-label="Rename ${name}">${PEN}</button>
             <button class="icon-btn" type="button" data-delete-group="${id}" aria-label="Delete ${name}">${BIN}</button>
           </div></li>`;
@@ -1304,7 +1347,10 @@
     const pick = ev.target.closest('[data-pick]');
     const rename = ev.target.closest('[data-rename]');
     const del = ev.target.closest('[data-delete-group]');
-    if (pick) {
+    const pdf = ev.target.closest('[data-export-group]');
+    if (pdf) {
+      exportStatement(findGroup(pdf.dataset.exportGroup));
+    } else if (pick) {
       switchGroup(pick.dataset.pick);
       groupsDialog.close();
     } else if (rename) {

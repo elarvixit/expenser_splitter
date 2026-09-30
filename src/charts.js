@@ -70,8 +70,8 @@
     const { top, step } = niceScale(Math.max(...summary.months.map((m) => m.total)));
     const yOf = (v) => pad.top + plotH - (v / top) * plotH;
 
-    const svg = el('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height, class: 'chart-svg', role: 'img',
-      'aria-label': `Monthly spending by category, ${summary.months[0].label} to ${summary.months[summary.months.length - 1].label}` }, wrap);
+    const svg = el('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height, class: 'chart-svg', role: 'group',
+      'aria-label': `${(opts && opts.bucketName) === 'Day' ? 'Daily' : 'Monthly'} spending by category, ${summary.months[0].label} to ${summary.months[summary.months.length - 1].label}` }, wrap);
 
     // recessive gridlines + y labels
     for (let v = 0; v <= top + 1e-9; v += step) {
@@ -84,7 +84,8 @@
     const n = summary.months.length;
     const band = plotW / n;
     const barW = Math.max(6, Math.min(24, band * 0.56));
-    const labelEvery = band < 34 ? 2 : 1;
+    const longest = Math.max(...summary.months.map((m) => m.label.length));
+    const labelEvery = Math.max(1, Math.ceil((longest * 6.4 + 10) / band)); // ~6.4px per 11px glyph
     const GAP = 2;
     const columns = [];
 
@@ -142,10 +143,20 @@
       for (const c of columns) c.g.classList.remove('dim');
       tooltip.hidden = true;
     }
+    const onSelect = opts && opts.onSelect;
     for (const col of columns) {
       col.hit.addEventListener('pointerenter', () => show(col));
       col.hit.addEventListener('focus', () => show(col));
       col.hit.addEventListener('blur', hide);
+      if (onSelect && col.month.total > 0) {
+        col.hit.classList.add('selectable');
+        col.hit.setAttribute('role', 'button');
+        col.hit.setAttribute('aria-label', `${col.hit.getAttribute('aria-label')}. Show by day`);
+        col.hit.addEventListener('click', () => onSelect(col.month));
+        col.hit.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSelect(col.month); }
+        });
+      }
     }
     svg.addEventListener('pointerleave', hide);
 
@@ -167,7 +178,7 @@
     const scroller = html('div', 'table-scroll', details);
     const table = html('table', null, scroller);
     const head = html('tr', null, html('thead', null, table));
-    html('th', null, head, 'Month');
+    html('th', null, head, (opts && opts.bucketName) || 'Month');
     for (const s of summary.series) html('th', null, head, s.name);
     html('th', null, head, 'Total');
     const body = html('tbody', null, table);
@@ -183,5 +194,108 @@
     html('td', 'num', foot, money(summary.total));
   }
 
-  root.SplitCharts = { renderSpending, shortRupees, niceScale };
+  /** Arc path for a donut slice from angle a0 to a1 (radians, 0 = 12 o'clock, clockwise). */
+  function slicePath(cx, cy, r0, r1, a0, a1) {
+    const pt = (r, a) => [cx + r * Math.sin(a), cy - r * Math.cos(a)];
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const [x0, y0] = pt(r1, a0);
+    const [x1, y1] = pt(r1, a1);
+    const [x2, y2] = pt(r0, a1);
+    const [x3, y3] = pt(r0, a0);
+    return `M${x0},${y0}A${r1},${r1} 0 ${large} 1 ${x1},${y1}L${x2},${y2}A${r0},${r0} 0 ${large} 0 ${x3},${y3}Z`;
+  }
+
+  /**
+   * Donut of parts of a whole, with a centre total, per-slice tooltip and a legend.
+   *   items: [{ name, color, total, includes? }]  (zeros already dropped)
+   */
+  function renderDonut(container, data, opts) {
+    const money = (opts && opts.formatMoney) || ((p) => String(p));
+    container.replaceChildren();
+    if (!data.items.length || data.total <= 0) {
+      const empty = html('div', 'empty', container);
+      html('strong', null, empty, (opts && opts.emptyTitle) || 'Nothing to show yet');
+      empty.appendChild(document.createTextNode((opts && opts.emptyText) || 'Add expenses to see who spent what.'));
+      return;
+    }
+
+    const layout = html('div', 'donut-layout', container);
+    const wrap = html('div', 'donut-wrap', layout);
+    const size = 184;
+    const c = size / 2;
+    const r1 = 88;
+    const r0 = 58;
+    const svg = el('svg', { viewBox: `0 0 ${size} ${size}`, class: 'donut-svg', role: 'group',
+      'aria-label': `${(opts && opts.title) || 'Share'}: ${data.items.map((it) => `${it.name} ${money(it.total)}`).join(', ')}` }, wrap);
+    const tooltip = html('div', 'chart-tooltip donut-tooltip', wrap);
+    tooltip.hidden = true;
+
+    const pct = (v) => Math.round((v / data.total) * 1000) / 10;
+    const slices = [];
+    let angle = 0;
+    for (const it of data.items) {
+      const sweep = (it.total / data.total) * Math.PI * 2;
+      // a single 100% slice can't be one arc: draw it as two halves
+      const d = sweep >= Math.PI * 2 - 1e-6
+        ? slicePath(c, c, r0, r1, 0, Math.PI) + slicePath(c, c, r0, r1, Math.PI, Math.PI * 2)
+        : slicePath(c, c, r0, r1, angle, angle + sweep);
+      const path = el('path', { d, fill: it.color, class: 'donut-slice', tabindex: 0,
+        'aria-label': `${it.name}: ${money(it.total)}, ${pct(it.total)}%` }, svg);
+      slices.push({ path, it, mid: angle + sweep / 2 });
+      angle += sweep;
+    }
+
+    const centre = el('text', { x: c, y: c - 4, 'text-anchor': 'middle', class: 'donut-total' }, svg);
+    centre.textContent = money(data.total);
+    const caption = el('text', { x: c, y: c + 16, 'text-anchor': 'middle', class: 'donut-caption' }, svg);
+    caption.textContent = (opts && opts.centerLabel) || 'total';
+
+    function show(s) {
+      for (const o of slices) o.path.classList.toggle('dim', o !== s);
+      tooltip.replaceChildren();
+      const row = html('div', 'tt-row', tooltip);
+      html('strong', null, row, money(s.it.total));
+      html('span', null, row, `${pct(s.it.total)}%`);
+      html('div', 'tt-head', tooltip, s.it.name);
+      if (s.it.includes) html('div', 'tt-sub', tooltip, s.it.includes.join(', '));
+      tooltip.hidden = false;
+      // outside the ring, on the slice's side
+      const scale = wrap.clientWidth / size;
+      const x = (c + (r1 + 10) * Math.sin(s.mid)) * scale;
+      const y = (c - (r1 + 10) * Math.cos(s.mid)) * scale;
+      const tw = tooltip.offsetWidth;
+      const th = tooltip.offsetHeight;
+      // keep it inside the chart area (the layout box), even when the ring is centred on a phone
+      const box = layout.getBoundingClientRect();
+      const self = wrap.getBoundingClientRect();
+      const minLeft = box.left - self.left;
+      const maxLeft = box.right - self.left - tw;
+      const want = Math.sin(s.mid) >= 0 ? x : x - tw;
+      tooltip.style.left = `${Math.max(minLeft, Math.min(want, maxLeft))}px`;
+      tooltip.style.top = `${Math.max(-th / 2, Math.min(y - th / 2, wrap.clientHeight - th / 2))}px`;
+    }
+    function hide() {
+      for (const o of slices) o.path.classList.remove('dim');
+      tooltip.hidden = true;
+    }
+    for (const s of slices) {
+      s.path.addEventListener('pointerenter', () => show(s));
+      s.path.addEventListener('focus', () => show(s));
+      s.path.addEventListener('blur', hide);
+    }
+    svg.addEventListener('pointerleave', hide);
+
+    const legend = html('ul', 'donut-legend', layout);
+    for (const it of data.items) {
+      const li = html('li', null, legend);
+      const key = html('i', 'legend-key', li);
+      key.style.background = it.color;
+      const name = html('span', 'legend-name', li, it.name);
+      if (it.includes) name.title = it.includes.join(', ');
+      html('span', 'legend-value num', li, money(it.total));
+      html('span', 'legend-share num', li, `${Math.round((it.total / data.total) * 100)}%`);
+    }
+  }
+
+  root.SplitCharts = { renderSpending, renderDonut, shortRupees, niceScale };
 })(typeof self !== 'undefined' ? self : this);

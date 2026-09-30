@@ -79,9 +79,64 @@
 
   const monthKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 
+  // Full year on purpose: "Sept 26" read as the 26th of September.
   function monthLabel(key) {
     const [y, m] = key.split('-').map(Number);
-    return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+    return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+  }
+
+  const dayKey = (date) => `${monthKey(date)}-${String(date.getDate()).padStart(2, '0')}`;
+
+  function dayLabel(key) {
+    const [y, m, d] = key.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  }
+
+  /** Series (fixed palette order) for a set of buckets; customs after the first fold into Other. */
+  function seriesFor(expenses, buckets, folded) {
+    const firstCustom = customCategories(expenses)[0];
+    const order = [...PRESET_NAMES.filter((n) => n !== OTHER), ...(firstCustom ? [firstCustom] : []), OTHER];
+    return order
+      .map((name) => ({
+        name,
+        color: name === firstCustom ? CUSTOM_COLOR : presetColor(name),
+        total: buckets.reduce((a, b) => a + (b.byCategory[name] || 0), 0),
+        includes: name === OTHER ? [...folded] : [],
+      }))
+      .filter((s) => s.total > 0);
+  }
+
+  /**
+   * Daily spend by category within one month (same shape as monthlySpend; buckets are days).
+   * Days run from the first to the last day with spend in that month, gaps filled with zero.
+   */
+  function dailySpend(expenses, month) {
+    const customs = customCategories(expenses);
+    const seriesName = (cat) => (isPreset(cat) || cat === customs[0] ? cat : OTHER);
+    const byDay = new Map();
+    const folded = new Set();
+    for (const e of expenses) {
+      const d = new Date(e.createdAt);
+      if (isNaN(d) || monthKey(d) !== month) continue;
+      const cat = categoryOf(e);
+      const name = seriesName(cat);
+      if (name === OTHER && cat !== OTHER) folded.add(cat);
+      const key = dayKey(d);
+      if (!byDay.has(key)) byDay.set(key, {});
+      byDay.get(key)[name] = (byDay.get(key)[name] || 0) + e.amount;
+    }
+    const days = [];
+    const keys = [...byDay.keys()].sort();
+    if (keys.length) {
+      const first = Number(keys[0].slice(-2));
+      const last = Number(keys[keys.length - 1].slice(-2));
+      for (let d = first; d <= last; d++) {
+        const key = `${month}-${String(d).padStart(2, '0')}`;
+        const byCategory = byDay.get(key) || {};
+        days.push({ key, label: dayLabel(key), total: Object.values(byCategory).reduce((a, b) => a + b, 0), byCategory });
+      }
+    }
+    return { months: days, series: seriesFor(expenses, days, folded), total: days.reduce((a, b) => a + b.total, 0) };
   }
 
   /**
@@ -127,23 +182,45 @@
       }
     }
     const shown = months.slice(-maxMonths);
+    return { months: shown, series: seriesFor(expenses, shown, folded), total: shown.reduce((a, mo) => a + mo.total, 0) };
+  }
 
-    const order = [...PRESET_NAMES.filter((n) => n !== OTHER), ...(firstCustom ? [firstCustom] : []), OTHER];
-    const series = order
-      .map((name) => ({
-        name,
-        color: name === firstCustom ? CUSTOM_COLOR : presetColor(name),
-        total: shown.reduce((a, mo) => a + (mo.byCategory[name] || 0), 0),
-        includes: name === OTHER ? [...folded] : [],
-      }))
-      .filter((s) => s.total > 0);
+  // People take the reference categorical slots in the group's member order (colour follows the
+  // person, not their rank). Past 8 people, the rest fold into one "Others" slice.
+  const PERSON_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 
-    return { months: shown, series, total: shown.reduce((a, mo) => a + mo.total, 0) };
+  /**
+   * How much each person spent in a group, in paise.
+   *   mode 'paid'  – out of their own pocket (expenses they paid for)
+   *   mode 'share' – their portion of the expenses
+   * Payments between members are paybacks, not spending, so they are not counted.
+   * @returns {{ items: {id,name,color,total}[], total: number }}  items in member order, zeros dropped
+   */
+  function spendByPerson(group, mode) {
+    const totals = new Map(group.members.map((m) => [m.id, 0]));
+    for (const e of group.expenses) {
+      if (mode === 'share') {
+        for (const s of e.splits) if (totals.has(s.memberId)) totals.set(s.memberId, totals.get(s.memberId) + s.amount);
+      } else if (totals.has(e.paidBy)) {
+        totals.set(e.paidBy, totals.get(e.paidBy) + e.amount);
+      }
+    }
+    const people = group.members.map((m, i) => ({ id: m.id, name: m.name, index: i, total: totals.get(m.id) }));
+    const items = people.slice(0, 7).map((p) => ({ id: p.id, name: p.name, color: PERSON_COLORS[p.index], total: p.total }));
+    if (people.length === 8) {
+      items.push({ id: people[7].id, name: people[7].name, color: PERSON_COLORS[7], total: people[7].total });
+    } else if (people.length > 8) {
+      const rest = people.slice(7);
+      items.push({ id: '__others', name: `${rest.length} others`, color: PERSON_COLORS[7], total: rest.reduce((a, p) => a + p.total, 0),
+        includes: rest.map((p) => p.name) });
+    }
+    const shown = items.filter((it) => it.total > 0);
+    return { items: shown, total: shown.reduce((a, it) => a + it.total, 0) };
   }
 
   return {
-    PRESETS, OTHER, CUSTOM_COLOR,
+    PRESETS, OTHER, CUSTOM_COLOR, PERSON_COLORS,
     guessCategory, normalizeCategory, categoryOf, isPreset, presetColor, customCategories,
-    monthKey, monthLabel, monthlySpend,
+    monthKey, monthLabel, dayLabel, monthlySpend, dailySpend, spendByPerson,
   };
 });
