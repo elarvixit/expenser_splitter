@@ -16,29 +16,56 @@
     formatPaise,
     ValidationError,
   } = window.SplitCore;
+  const Cat = window.SplitCategories;
 
   const STORE_KEY = 'splitter:v2';
   const LEGACY_KEY = 'halve:v1'; // single-group data from the first version
+  const SESSION_KEY = 'splitter:session';
   const $ = (sel) => document.querySelector(sel);
-  // null when config.js has no Supabase settings → local-only mode
+  // null when config.js has no Supabase settings → local-only mode (no accounts)
   const remote = window.SplitterRemote ? window.SplitterRemote.createRemote(window.SPLITTER_CONFIG) : null;
 
+  // ---------- account ----------
+  // Splitter has its own accounts (email + password). Signed out, groups live only on this
+  // device; signed in, they sync to the account and each user sees only their own groups.
+
+  function loadSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+      return s && typeof s.token === 'string' && typeof s.email === 'string' ? s : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveSession() {
+    try {
+      if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      else localStorage.removeItem(SESSION_KEY);
+    } catch (_) { /* storage unavailable */ }
+  }
+
+  let session = remote ? loadSession() : null; // { token, email } or null
+  const canSync = () => !!(remote && session);
+
   // ---------- state ----------
-  // store = { activeGroupId, groups: [group] }
+  // store = { account, activeGroupId, groups: [group] }   (account = signed-in email, or null)
   // group = { id, groupName, members, expenses, settlements, createdAt,
-  //           token     – secret share token once the group exists in Supabase (else null)
+  //           token     – the group's id in Supabase once uploaded (else null)
+  //           owned     – the server confirmed this account owns it
   //           version   – server version this copy is based on
   //           rev       – local change counter; synced when rev === syncedRev }
 
   function newGroup(name) {
     return {
       id: uid('g'), groupName: name || 'New group', members: [], expenses: [], settlements: [],
-      createdAt: new Date().toISOString(), token: null, version: 0, rev: 0, syncedRev: 0,
+      createdAt: new Date().toISOString(), token: null, owned: false, version: 0, rev: 0, syncedRev: 0,
     };
   }
 
   function normalizeGroup(g) {
     g.token = g.token || null;
+    g.owned = !!g.owned;
     g.version = Number.isInteger(g.version) ? g.version : 0;
     g.rev = Number.isInteger(g.rev) ? g.rev : 0;
     g.syncedRev = Number.isInteger(g.syncedRev) ? g.syncedRev : g.rev;
@@ -47,6 +74,7 @@
   }
 
   const hasContent = (g) => g.members.length > 0 || g.expenses.length > 0 || g.settlements.length > 0;
+  const needsSync = (g) => g.rev !== g.syncedRev || (!g.token && hasContent(g)) || (!!g.token && !g.owned);
 
   function isValidGroup(g) {
     try {
@@ -57,25 +85,32 @@
     }
   }
 
+  function freshStore(account) {
+    const g = newGroup('My group');
+    return { account: account || null, activeGroupId: g.id, groups: [g] };
+  }
+
   function loadStore() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) {
         const s = JSON.parse(raw);
+        const account = (s && s.account) || null;
+        // Another account's cached groups (or a session that ended) never show on this device.
+        if (account && (!session || session.email !== account)) return freshStore(session && session.email);
         const groups = (s && Array.isArray(s.groups) ? s.groups : []).filter(isValidGroup).map(normalizeGroup);
         if (groups.length) {
           const active = groups.some((g) => g.id === s.activeGroupId) ? s.activeGroupId : groups[0].id;
-          return { activeGroupId: active, groups };
+          return { account, activeGroupId: active, groups };
         }
       }
       const legacy = localStorage.getItem(LEGACY_KEY);
       if (legacy) {
         const g = normalizeGroup(Object.assign(newGroup(), JSON.parse(legacy)));
-        if (isValidGroup(g)) return { activeGroupId: g.id, groups: [g] };
+        if (isValidGroup(g)) return { account: null, activeGroupId: g.id, groups: [g] };
       }
     } catch (_) { /* fall through to a fresh store */ }
-    const g = newGroup('My group');
-    return { activeGroupId: g.id, groups: [g] };
+    return freshStore(null);
   }
 
   function save() {
@@ -97,7 +132,7 @@
     if (next.id === state.id) state = next;
     save();
     render();
-    if (remote) {
+    if (canSync()) {
       pendingOps(next.id).push({ rev: next.rev, mutate }); // kept so it can be replayed on a conflict
       sync(next.id);
     }
@@ -126,12 +161,13 @@
   }
 
   // ---------- Supabase sync ----------
-  // Every change is applied locally first, then pushed with save_group(token, version, group).
-  // If someone else saved in between, the server answers 'version_conflict': we fetch the
+  // Every change is applied locally first, then pushed with save_group(session, token, version, group).
+  // If another device saved in between, the server answers 'version_conflict': we fetch the
   // latest copy, replay our not-yet-saved changes on top of it and try again.
 
   const ops = new Map(); // groupId → [{ rev, mutate }] not yet confirmed by the server
   const inflight = new Map(); // groupId → promise of the running sync (syncs are serialized)
+  const pendingDeletes = new Map(); // groupId → timer for a server delete that can still be undone
   let offline = false;
 
   function pendingOps(id) {
@@ -148,6 +184,7 @@
       expenses: server.expenses,
       settlements: server.settlements,
       version: server.version,
+      owned: true,
     });
     delete next.loading;
     calculateBalances(next); // never accept a ledger the engine rejects
@@ -155,11 +192,12 @@
   }
 
   function sync(id, opts) {
-    if (!remote) return Promise.resolve();
+    if (!canSync()) return Promise.resolve();
     const run = (inflight.get(id) || Promise.resolve())
       .then(() => pushGroup(id, opts || {}))
       .then(() => { offline = false; })
       .catch((err) => {
+        if (err && err.signedOut) return handleSignedOut();
         offline = true;
         console.warn('Splitter sync failed; will retry', err);
       })
@@ -174,26 +212,37 @@
 
   async function pushGroup(id, { force = false }) {
     for (let guard = 0; guard < 8; guard++) {
+      if (!canSync()) return;
       let g = findGroup(id);
-      if (!g || g.loading) return;
+      if (!g || g.loading || pendingDeletes.has(id)) return;
       if (!g.token) {
         if (!force && !hasContent(g)) return; // don't create empty groups on the server
-        const token = await remote.createGroup(g.groupName);
+        const token = await remote.createGroup(session.token, g.groupName);
         g = findGroup(id);
         if (!g) return;
-        putGroup(Object.assign({}, g, { token, version: 0, syncedRev: -1 })); // -1 → must save contents
+        putGroup(Object.assign({}, g, { token, owned: true, version: 0, syncedRev: -1 })); // -1 → must save contents
         if (id === state.id) updateHash();
+        continue;
+      }
+      if (!g.owned) {
+        // A group from before accounts (or from another device): move it into this account.
+        const mine = await remote.claimGroup(session.token, g.token);
+        g = findGroup(id);
+        if (!g) return;
+        // Someone else already owns it: keep this device's copy as a new group of our own.
+        putGroup(Object.assign({}, g, mine ? { owned: true } : { token: null, version: 0, syncedRev: -1 }));
         continue;
       }
       if (g.rev === g.syncedRev) return;
       const sentRev = g.rev;
       try {
-        const version = await remote.saveGroup(g.token, g.version, payloadOf(g));
+        const version = await remote.saveGroup(session.token, g.token, g.version, payloadOf(g));
         const latest = findGroup(id);
         if (!latest) return;
         putGroup(Object.assign({}, latest, { version, syncedRev: sentRev }));
         ops.set(id, pendingOps(id).filter((op) => op.rev > sentRev));
       } catch (err) {
+        if (err.signedOut) throw err;
         if (/version_conflict/.test(err.message)) await rebase(id);
         else if (err.status === 400 || err.status === 409) await discardRejected(id, err);
         else throw err; // network / server trouble → retried later
@@ -201,15 +250,15 @@
     }
   }
 
-  /** The server refused our copy (e.g. a duplicate name added at the same time elsewhere). */
+  /** The server refused our copy (e.g. a duplicate name added at the same time on another device). */
   async function discardRejected(id, err) {
     const g = findGroup(id);
-    const server = await remote.getGroup(g.token);
+    const server = await remote.getGroup(session.token, g.token);
     const latest = findGroup(id);
     if (!latest) return;
     if (!server) {
-      // The group vanished from the server: re-create it (with a new link) from this copy.
-      putGroup(Object.assign({}, latest, { token: null, version: 0, syncedRev: -1 }));
+      // The group vanished from the account: re-create it from this copy.
+      putGroup(Object.assign({}, latest, { token: null, owned: false, version: 0, syncedRev: -1 }));
       return;
     }
     ops.set(id, []);
@@ -222,7 +271,7 @@
   /** Fetch the latest server copy and replay our unsaved changes on top of it. */
   async function rebase(id) {
     const g = findGroup(id);
-    const server = await remote.getGroup(g.token);
+    const server = await remote.getGroup(session.token, g.token);
     const latest = findGroup(id);
     if (!server || !latest) return;
     let next = fromServer(latest, server);
@@ -246,21 +295,22 @@
     putGroup(next);
     if (id === state.id) render();
     if (dropped || lostOffline) {
-      toast('Someone else changed this group at the same time — some of your edits could not be applied');
+      toast('This group was also changed on another device — some of your edits could not be applied');
     }
   }
 
-  /** Refresh a group from the server if someone else changed it (skipped while we have unsaved edits). */
+  /** Refresh a group from the server if it changed elsewhere (skipped while we have unsaved edits). */
   async function pull(id) {
-    if (!remote) return;
+    if (!canSync()) return;
     const g = findGroup(id);
-    if (!g || !g.token || inflight.has(id)) return;
+    if (!g || !g.token || !g.owned || inflight.has(id)) return;
     if (g.rev !== g.syncedRev && !g.loading) return; // our own unsaved edits win until they're pushed
     let server;
     try {
-      server = await remote.getGroup(g.token);
+      server = await remote.getGroup(session.token, g.token);
       offline = false;
     } catch (err) {
+      if (err.signedOut) return handleSignedOut();
       offline = true;
       renderSyncStatus();
       return;
@@ -268,19 +318,69 @@
     const latest = findGroup(id);
     if (!latest || inflight.has(id)) return;
     if (!server) {
-      if (latest.loading) {
-        removeGroupLocally(id);
-        toast('That group link is invalid or the group no longer exists');
-      }
+      // Deleted on another device (or not this account's).
+      if (latest.rev === latest.syncedRev) removeGroupLocally(id);
       return;
     }
     if (latest.rev !== latest.syncedRev) {
-      if (latest.loading) { await rebase(id); sync(id); } // edits made while the link was loading
+      if (latest.loading) { await rebase(id); sync(id); } // edits made while it was loading
       return;
     }
     if (server.version === latest.version && !latest.loading) return renderSyncStatus();
     putGroup(fromServer(latest, server));
     if (id === state.id) render();
+    else if (groupsDialog.open) renderGroupList();
+  }
+
+  /** Bring this device's list in line with the account: add new groups, drop deleted ones, pull changes. */
+  async function refreshGroupList() {
+    if (!canSync()) return;
+    let list;
+    try {
+      list = await remote.listGroups(session.token);
+      offline = false;
+    } catch (err) {
+      if (err.signedOut) return handleSignedOut();
+      offline = true;
+      return renderSyncStatus();
+    }
+    if (!canSync()) return;
+    const byToken = new Map(list.map((item) => [item.token, item]));
+    const deleting = new Set([...pendingDeletes.values()].map((p) => p.token)); // still on the server until Undo expires
+    let changed = false;
+    for (const item of list) {
+      if (!deleting.has(item.token) && !store.groups.some((g) => g.token === item.token)) {
+        store.groups.push(Object.assign(newGroup(item.name), { token: item.token, owned: true, version: -1, loading: true }));
+        changed = true;
+      }
+    }
+    for (const g of store.groups.slice()) {
+      const gone = g.owned && g.token && !byToken.has(g.token);
+      if (gone && g.rev === g.syncedRev && !inflight.has(g.id) && !pendingDeletes.has(g.id)) {
+        removeGroupLocally(g.id);
+        changed = true;
+      }
+    }
+    // An untouched starter group is just clutter once the account's own groups arrive.
+    if (store.groups.length > 1) {
+      const clutter = store.groups.filter((g) => !g.token && g.rev === 0 && !hasContent(g));
+      if (clutter.length && clutter.length < store.groups.length) {
+        store.groups = store.groups.filter((g) => !clutter.includes(g));
+        if (!store.groups.includes(state)) state = store.groups[0];
+        store.activeGroupId = state.id;
+        changed = true;
+      }
+    }
+    if (changed) {
+      save();
+      render();
+      updateHash();
+      if (groupsDialog.open) renderGroupList();
+    }
+    for (const g of store.groups) {
+      const item = g.token && byToken.get(g.token);
+      if (item && (g.loading || item.version !== g.version)) pull(g.id);
+    }
   }
 
   function removeGroupLocally(id) {
@@ -298,60 +398,56 @@
     return m ? m[1].toLowerCase() : null;
   };
 
+  /** Keep #g=<token> in the address bar for the open group, so a refresh or bookmark returns to it. */
   function updateHash() {
     if (!remote) return;
-    const url = state.token ? `#g=${state.token}` : location.pathname + location.search;
-    if (location.hash !== (state.token ? `#g=${state.token}` : '')) history.replaceState(null, '', url);
+    const token = canSync() && state.owned ? state.token : null;
+    const want = token ? `#g=${token}` : '';
+    if (location.hash !== want) history.replaceState(null, '', token ? want : location.pathname + location.search);
   }
 
-  /** Open the group in the URL (#g=<token>), adding it to this device's list if it's new. */
-  function openFromLink() {
+  /** Open the group in the URL (#g=<token>). Groups are private: it must be (or become) this account's. */
+  async function openFromLink() {
     const token = tokenFromHash();
     if (!remote || !token) return;
-    let g = store.groups.find((x) => x.token === token);
-    if (!g) {
-      g = Object.assign(newGroup('Loading group…'), { token, version: -1, loading: true });
-      // A first-time visitor's untouched starter group is just clutter next to the shared one.
-      store.groups = store.groups.filter((x) => x.token || x.rev > 0 || hasContent(x));
-      store.groups.push(g);
+    const existing = store.groups.find((x) => x.token === token);
+    if (existing) {
+      if (existing.id !== state.id) switchGroup(existing.id);
+      return;
     }
-    if (g.id !== state.id) switchGroup(g.id);
-    else pull(g.id);
-  }
-
-  const shareUrl = (g) => `${location.origin}${location.pathname}#g=${g.token}`;
-
-  async function shareGroup() {
-    const id = state.id;
-    if (!findGroup(id).token) {
-      toast('Creating a share link…');
-      await sync(id, { force: true });
+    if (!session) {
+      toast('Sign in to open this group');
+      openAuth('signin');
+      return;
     }
-    const g = findGroup(id);
-    if (!g || !g.token) return toast('Could not create a link — check your connection and try again');
-    const url = shareUrl(g);
-    if (navigator.share && window.matchMedia('(pointer: coarse)').matches) {
-      try { await navigator.share({ title: `${g.groupName} · Splitter`, url }); return; } catch (_) { /* fall back to copy */ }
-    }
+    let mine = false;
     try {
-      await navigator.clipboard.writeText(url);
-      toast('Link copied — anyone with it can view and edit this group');
-    } catch (_) {
-      window.prompt('Copy this link to share the group:', url);
+      mine = await remote.claimGroup(session.token, token); // true for our own, or an unowned older group
+    } catch (err) {
+      if (err.signedOut) return handleSignedOut();
+      return toast('Could not open that group — check your connection');
     }
+    if (!mine) {
+      toast('That group belongs to another account');
+      updateHash();
+      return;
+    }
+    const g = Object.assign(newGroup('Loading group…'), { token, owned: true, version: -1, loading: true });
+    store.groups.push(g);
+    switchGroup(g.id);
   }
 
   function renderSyncStatus() {
     const pill = $('#sync-status');
-    $('#btn-share').hidden = !remote;
     pill.hidden = !remote;
     if (!remote) return;
     let cls = 'synced';
-    let text = 'Synced';
-    if (state.loading) [cls, text] = ['saving', 'Loading…'];
+    let text = 'Synced to your account';
+    if (!session) [cls, text] = ['local', 'Only on this device'];
+    else if (state.loading) [cls, text] = ['saving', 'Loading…'];
     else if (inflight.has(state.id)) [cls, text] = ['saving', 'Saving…'];
-    else if (offline && (state.rev !== state.syncedRev || !state.token)) [cls, text] = ['offline', 'Offline — will retry'];
-    else if (!state.token) [cls, text] = ['local', 'Only on this device'];
+    else if (offline && needsSync(state)) [cls, text] = ['offline', 'Offline — will retry'];
+    else if (!state.token) [cls, text] = ['local', 'Saves once you add someone'];
     else if (state.rev !== state.syncedRev) [cls, text] = ['saving', 'Waiting to save'];
     pill.className = `sync-pill ${cls}`;
     pill.textContent = text;
@@ -425,6 +521,8 @@
     renderActivity();
     renderGroupButton();
     renderSyncStatus();
+    renderSpending();
+    $('#btn-export').disabled = state.members.length === 0;
     $('#btn-add').disabled = state.members.length === 0;
     $('#btn-pay').disabled = state.members.length < 2;
   }
@@ -531,11 +629,56 @@
       .join('');
   }
 
+  const categoryColor = (name) => Cat.presetColor(name) || Cat.CUSTOM_COLOR;
+
   function describeSplit(e) {
     const n = e.splits.filter((s) => s.amount > 0).length;
     const mode = e.splitMode === 'exact' ? 'exact amounts' : e.splitMode === 'percent' ? 'by percentage' : 'equally';
-    return `${esc(nameOf(e.paidBy))} paid · split ${mode} · ${plural(n, 'person').replace('persons', 'people')}`;
+    const cat = Cat.categoryOf(e);
+    return `<i class="cat-dot" style="background:${categoryColor(cat)}"></i>${esc(cat)} · ${esc(nameOf(e.paidBy))} paid · split ${mode} · ${plural(n, 'person').replace('persons', 'people')}`;
   }
+
+  // ---------- spending chart ----------
+
+  let chartWidth = 0;
+  function renderSpending() {
+    const scope = (document.querySelector('input[name=spend-scope]:checked') || {}).value || 'group';
+    const expenses = scope === 'all' ? store.groups.flatMap((g) => g.expenses) : state.expenses;
+    const summary = Cat.monthlySpend(expenses);
+    const n = summary.months.length;
+    $('#spend-sub').textContent = n
+      ? `${scope === 'all' ? (store.groups.length > 1 ? `All ${store.groups.length} groups` : 'All groups') : 'This group'} ·${summary.months[0].label}${n > 1 ? ` – ${summary.months[n - 1].label}` : ''} · ${formatPaise(summary.total)}`
+      : 'Monthly, by category';
+    const box = $('#spend-chart');
+    chartWidth = box.clientWidth;
+    window.SplitCharts.renderSpending(box, summary, { formatMoney: (p) => formatPaise(p) });
+  }
+
+  document.querySelectorAll('input[name=spend-scope]').forEach((r) => r.addEventListener('change', renderSpending));
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => { if (Math.abs($('#spend-chart').clientWidth - chartWidth) > 8) renderSpending(); }).observe($('#spend-chart'));
+  }
+
+  // ---------- PDF statement ----------
+
+  $('#btn-export').addEventListener('click', async () => {
+    const btn = $('#btn-export');
+    if (!state.members.length) return toast('Add people and expenses first');
+    btn.disabled = true;
+    toast('Preparing your statement…');
+    try {
+      const name = await window.SplitStatement.download(state, {
+        calculateBalances, suggestSettlements, formatPaise,
+        categoryOf: Cat.categoryOf, monthlySpend: Cat.monthlySpend,
+      });
+      toast(`Downloaded ${name}`);
+    } catch (err) {
+      console.error(err);
+      toast(err && /PDF library/.test(err.message) ? err.message : 'Could not create the PDF');
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   function dateBadge(iso) {
     const d = new Date(iso);
@@ -665,6 +808,9 @@
     $('#ex-amount').value = existing ? (existing.amount / 100).toFixed(2) : '';
     $('#ex-desc').value = existing ? existing.description : '';
     $('#ex-payer').value = existing ? existing.paidBy : state.members[0].id;
+    const when = existing && !isNaN(new Date(existing.createdAt)) ? new Date(existing.createdAt) : new Date();
+    $('#ex-date').value = localDay(when);
+    $('#ex-date').max = localDay(new Date());
 
     const ids = state.members.map((m) => m.id);
     draft = { mode: 'equal', included: new Set(ids), exact: {}, percent: {} };
@@ -678,10 +824,55 @@
       }
     }
     exForm.querySelector(`input[name=mode][value=${draft.mode}]`).checked = true;
+    const cat = existing ? Cat.categoryOf(existing) : 'Other';
+    category = { value: cat, custom: !Cat.isPreset(cat), touched: !!(existing && existing.category) };
+    $('#ex-cat-custom').value = category.custom ? cat : '';
+    renderCategoryChips();
     renderSplitRows();
     exDialog.showModal();
     setTimeout(() => $('#ex-amount').focus(), 30);
   }
+
+  const localDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  /** The picked day as an ISO timestamp. Keeps the original time of day when the day is unchanged. */
+  function expenseDate(previousIso) {
+    const day = $('#ex-date').value;
+    const prev = previousIso ? new Date(previousIso) : null;
+    if (prev && !isNaN(prev) && localDay(prev) === day) return previousIso;
+    const [y, m, d] = day.split('-').map(Number);
+    const now = new Date();
+    const at = localDay(now) === day ? now : new Date(y, m - 1, d, 12, 0, 0); // past days: midday
+    return at.toISOString();
+  }
+
+  // Category: a preset chip, or "Custom…" with a free-text name. Until the user picks one,
+  // it follows a guess from the description.
+  let category = { value: 'Other', custom: false, touched: false };
+
+  function renderCategoryChips() {
+    const chips = Cat.PRESETS.map((p) => {
+      const on = !category.custom && category.value === p.name;
+      return `<button type="button" class="cat-chip" role="radio" aria-checked="${on}" data-cat="${esc(p.name)}">
+        <i style="background:${p.color}"></i>${esc(p.name)}</button>`;
+    });
+    chips.push(`<button type="button" class="cat-chip" role="radio" aria-checked="${category.custom}" data-cat-custom>
+      <i style="background:${Cat.CUSTOM_COLOR}"></i>Custom…</button>`);
+    $('#ex-cats').innerHTML = chips.join('');
+    $('#ex-cat-custom').hidden = !category.custom;
+    const customs = Cat.customCategories(store.groups.flatMap((g) => g.expenses));
+    $('#custom-cats').innerHTML = customs.map((c) => `<option value="${esc(c)}"></option>`).join('');
+  }
+
+  $('#ex-cats').addEventListener('click', (ev) => {
+    const preset = ev.target.closest('[data-cat]');
+    const custom = ev.target.closest('[data-cat-custom]');
+    if (preset) category = { value: preset.dataset.cat, custom: false, touched: true };
+    else if (custom) category = { value: $('#ex-cat-custom').value.trim(), custom: true, touched: true };
+    else return;
+    renderCategoryChips();
+    if (custom) $('#ex-cat-custom').focus();
+  });
 
   /** Build the explicit paise splits from the current draft. Throws ValidationError. */
   function buildSplits(amount) {
@@ -796,7 +987,15 @@
   exForm.addEventListener('input', (ev) => {
     const t = ev.target;
     $('#ex-error').textContent = '';
-    if (t.id === 'ex-amount') {
+    if (t.id === 'ex-desc' && !category.touched) {
+      const guess = Cat.guessCategory(t.value);
+      if (guess !== category.value || category.custom) {
+        category = { value: guess, custom: false, touched: false };
+        renderCategoryChips();
+      }
+    } else if (t.id === 'ex-cat-custom') {
+      category.value = t.value.trim();
+    } else if (t.id === 'ex-amount') {
       updatePreviewOnly();
     } else if (t.dataset.exact) {
       draft.exact[t.dataset.exact] = t.value;
@@ -841,17 +1040,29 @@
       $('#ex-amount').focus();
       return;
     }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test($('#ex-date').value)) {
+      err.textContent = 'Pick the date of the expense.';
+      $('#ex-date').focus();
+      return;
+    }
+    const chosen = category.custom ? Cat.normalizeCategory($('#ex-cat-custom').value) : category.value;
+    if (!chosen) {
+      err.textContent = 'Type a name for your category, or pick one of the list.';
+      $('#ex-cat-custom').focus();
+      return;
+    }
     try {
       const splits = buildSplits(amount);
       const record = {
         id: editingId || uid('e'),
         description: $('#ex-desc').value.trim() || 'Expense',
+        category: chosen,
         paidBy: $('#ex-payer').value,
         amount,
         splits,
         splitMode: draft.mode,
         splitInput: draft.mode === 'percent' ? { percent: Object.assign({}, draft.percent) } : {},
-        createdAt: editingId ? state.expenses.find((e) => e.id === editingId).createdAt : new Date().toISOString(),
+        createdAt: expenseDate(editingId ? state.expenses.find((e) => e.id === editingId).createdAt : null),
       };
       commit((s) => {
         const i = s.expenses.findIndex((e) => e.id === record.id);
@@ -1044,12 +1255,16 @@
     if (state.id === id) switchGroup(store.groups[Math.min(index, store.groups.length - 1)].id);
     else { save(); render(); }
     renderGroupList();
-    const message = remote && removed.token
-      ? `${removed.groupName} removed from this device. Anyone with its link can still open it`
-      : `${removed.groupName} deleted`;
-    toast(message, {
+    // The account copy is deleted after the Undo window closes.
+    if (canSync() && removed.token && removed.owned) {
+      pendingDeletes.set(id, { token: removed.token, timer: setTimeout(() => runDelete(id), 6500) });
+    }
+    toast(`${removed.groupName} deleted`, {
       label: 'Undo',
       run: () => {
+        const pending = pendingDeletes.get(removed.id);
+        if (pending) clearTimeout(pending.timer);
+        pendingDeletes.delete(removed.id);
         const p = placeholder && store.groups.find((g) => g.id === placeholder.id);
         if (p && !p.members.length && !p.expenses.length && !p.settlements.length) store.groups.splice(store.groups.indexOf(p), 1);
         store.groups.splice(Math.min(index, store.groups.length), 0, removed);
@@ -1059,6 +1274,30 @@
         if (groupsDialog.open) renderGroupList();
       },
     });
+  }
+
+  async function runDelete(id) {
+    const pending = pendingDeletes.get(id);
+    if (!pending || pending.running) return;
+    pending.running = true;
+    clearTimeout(pending.timer);
+    try {
+      if (canSync()) await remote.deleteGroup(session.token, pending.token);
+    } catch (err) {
+      if (err.signedOut) return handleSignedOut();
+      console.warn('Splitter delete failed', err);
+      toast('Could not delete that group from your account — it may reappear');
+    } finally {
+      pendingDeletes.delete(id); // only now may a refresh see the account list again
+    }
+  }
+
+  /** Run any deletes still waiting out their Undo window (before signing out or leaving the page). */
+  function flushDeletes() {
+    return Promise.all([...pendingDeletes.entries()].map(([id, pending]) => {
+      clearTimeout(pending.timer);
+      return runDelete(id);
+    }));
   }
 
   $('#group-list').addEventListener('click', (ev) => {
@@ -1118,21 +1357,197 @@
   $('#btn-groups').addEventListener('click', openGroups);
   $('#btn-add').addEventListener('click', () => openExpense(null));
   $('#btn-pay').addEventListener('click', () => openPayment(null));
-  $('#btn-share').addEventListener('click', shareGroup);
+
+  // ---------- sign in / account ----------
+
+  const authDialog = $('#auth-dialog');
+  const accountDialog = $('#account-dialog');
+  let authMode = 'signin';
+
+  const AUTH_ERRORS = {
+    invalid_email: 'Enter a valid email address.',
+    weak_password: 'Use at least 8 characters for the password.',
+    email_taken: 'An account with this email already exists — sign in instead.',
+    invalid_credentials: 'Wrong email or password.',
+    account_locked: 'Too many wrong attempts. Try again in 15 minutes.',
+  };
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    authDialog.querySelectorAll('[data-auth-mode]').forEach((b) => {
+      b.setAttribute('aria-selected', String(b.dataset.authMode === mode));
+    });
+    $('#auth-title').textContent = mode === 'signup' ? 'Create your account' : 'Welcome back';
+    $('#auth-confirm-field').hidden = mode !== 'signup';
+    $('#auth-submit').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
+    $('#auth-password').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+    $('#auth-error').textContent = '';
+  }
+
+  function openAuth(mode) {
+    if (!remote) return;
+    setAuthMode(mode || 'signin');
+    $('#auth-password').value = '';
+    $('#auth-confirm').value = '';
+    if (!authDialog.open) authDialog.showModal();
+    setTimeout(() => $('#auth-email').focus(), 30);
+  }
+
+  authDialog.addEventListener('click', (ev) => {
+    const tab = ev.target.closest('[data-auth-mode]');
+    if (tab) setAuthMode(tab.dataset.authMode);
+    if (ev.target === authDialog || ev.target.closest('[data-close]')) authDialog.close();
+  });
+
+  $('#auth-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const err = $('#auth-error');
+    const email = $('#auth-email').value.trim();
+    const password = $('#auth-password').value;
+    err.textContent = '';
+    if (authMode === 'signup' && password !== $('#auth-confirm').value) {
+      err.textContent = 'The two passwords do not match.';
+      return;
+    }
+    const btn = $('#auth-submit');
+    btn.disabled = true;
+    try {
+      const res = authMode === 'signup' ? await remote.signUp(email, password) : await remote.signIn(email, password);
+      if (res && res.error) {
+        err.textContent = AUTH_ERRORS[res.error] || 'Could not sign in.';
+        return;
+      }
+      authDialog.close();
+      await completeSignIn(res);
+    } catch (e) {
+      err.textContent = /PGRST202|Could not find the function/.test(e.message)
+        ? 'Accounts are not set up on the server yet (run supabase/schema.sql).'
+        : 'Could not reach the server — check your connection.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  async function completeSignIn(res) {
+    session = { token: res.session, email: res.email };
+    saveSession();
+    // Groups made on this device while signed out move into the account.
+    const moving = store.groups.filter((g) => hasContent(g) && !g.owned).length;
+    store.account = res.email;
+    save();
+    render();
+    renderAccount();
+    await refreshGroupList();
+    for (const g of store.groups) if (needsSync(g)) sync(g.id);
+    if (tokenFromHash()) openFromLink();
+    toast(moving ? `Signed in — ${plural(moving, 'group')} from this device moved into your account` : `Signed in as ${res.email}`);
+  }
+
+  /** Forget the account on this device: its groups stay safe in the account, not in this browser. */
+  function resetToSignedOut(message) {
+    session = null;
+    saveSession();
+    ops.clear();
+    store = freshStore(null);
+    state = store.groups[0];
+    save();
+    history.replaceState(null, '', location.pathname + location.search);
+    render();
+    renderAccount();
+    if (message) toast(message);
+  }
+
+  async function signOut() {
+    const unsaved = store.groups.some((g) => needsSync(g) && (hasContent(g) || g.token));
+    if (unsaved && !window.confirm('Some changes have not reached your account yet and will be lost. Sign out anyway?')) return;
+    await flushDeletes();
+    const token = session && session.token;
+    accountDialog.close();
+    resetToSignedOut('Signed out. Your groups are safe in your account.');
+    if (token) remote.signOut(token).catch(() => {});
+  }
+
+  function handleSignedOut() {
+    if (!session) return;
+    resetToSignedOut('Your session ended — please sign in again');
+    openAuth('signin');
+  }
+
+  function renderAccount() {
+    const btn = $('#btn-account');
+    btn.hidden = !remote;
+    if (!remote) return;
+    btn.classList.toggle('signed-in', !!session);
+    $('#account-label').textContent = session ? session.email : 'Sign in';
+    $('#account-initial').textContent = session ? session.email.charAt(0).toUpperCase() : '';
+    btn.setAttribute('aria-label', session ? `Account: ${session.email}` : 'Sign in');
+  }
+
+  $('#btn-account').addEventListener('click', () => {
+    if (!session) return openAuth('signin');
+    $('#account-email').textContent = session.email;
+    $('#pw-form').reset();
+    $('#pw-form').hidden = true;
+    $('#pw-error').textContent = '';
+    accountDialog.showModal();
+  });
+
+  accountDialog.addEventListener('click', (ev) => {
+    if (ev.target === accountDialog || ev.target.closest('[data-close]')) accountDialog.close();
+    else if (ev.target.closest('#btn-signout')) signOut();
+    else if (ev.target.closest('#btn-change-pw')) {
+      $('#pw-form').hidden = false;
+      $('#pw-old').focus();
+    }
+  });
+
+  $('#pw-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const err = $('#pw-error');
+    err.textContent = '';
+    if ($('#pw-new').value !== $('#pw-confirm').value) {
+      err.textContent = 'The new passwords do not match.';
+      return;
+    }
+    try {
+      const res = await remote.changePassword(session.token, $('#pw-old').value, $('#pw-new').value);
+      if (res && res.error) {
+        err.textContent = res.error === 'invalid_credentials' ? 'Your current password is wrong.' : AUTH_ERRORS[res.error];
+        return;
+      }
+      accountDialog.close();
+      toast('Password changed. Your other devices were signed out.');
+    } catch (e) {
+      if (e.signedOut) return handleSignedOut();
+      err.textContent = 'Could not reach the server — try again.';
+    }
+  });
+
+  for (const d of [authDialog, accountDialog]) {
+    d.addEventListener('close', () => document.body.appendChild($('#toasts')));
+  }
+
+  // ---------- start ----------
 
   render();
+  renderAccount();
 
   if (remote) {
-    openFromLink();
-    updateHash();
-    // Upload local groups that aren't on the server yet, and anything left unsaved last time.
-    for (const g of store.groups) if (g.rev !== g.syncedRev || (!g.token && hasContent(g))) sync(g.id);
-    pull(state.id);
     window.addEventListener('hashchange', openFromLink);
-    // Pick up other people's changes: poll the open group, retry failed saves.
+    window.addEventListener('pagehide', () => { flushDeletes(); });
+    if (session) {
+      updateHash();
+      // Upload anything left unsaved last time, then bring the list in line with the account.
+      for (const g of store.groups) if (needsSync(g)) sync(g.id);
+      refreshGroupList().then(openFromLink);
+    } else {
+      openFromLink();
+    }
+    // Pick up changes made on other devices; retry failed saves.
     const refresh = () => {
-      for (const g of store.groups) if (!inflight.has(g.id) && g.rev !== g.syncedRev) sync(g.id); // even in background
-      if (!document.hidden) pull(state.id);
+      if (!canSync()) return;
+      for (const g of store.groups) if (!inflight.has(g.id) && needsSync(g)) sync(g.id); // even in background
+      if (!document.hidden) refreshGroupList();
     };
     setInterval(refresh, 15000);
     document.addEventListener('visibilitychange', refresh);

@@ -26,6 +26,11 @@
           <span class="groups-count num" id="groups-count"></span>
         </button>
         <button class="btn btn-ghost" id="btn-demo" type="button">Load demo</button>
+        <button class="btn btn-account" id="btn-account" type="button" aria-haspopup="dialog" hidden>
+          <span class="account-initial" id="account-initial" aria-hidden="true"></span>
+          <svg class="account-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="7" r="3.2"/><path d="M4 17c.8-3.2 3.2-4.8 6-4.8s5.2 1.6 6 4.8"/></svg>
+          <span class="account-label" id="account-label">Sign in</span>
+        </button>
         <button class="btn btn-soft" id="btn-pay" type="button">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12m-4-4 4 4-4 4"/></svg>
           <span>Record payment</span>
@@ -45,9 +50,9 @@
         <input id="group-name" class="group-name" maxlength="40" spellcheck="false" aria-label="Group name">
         <p class="hero-sub" id="hero-sub"></p>
         <div class="hero-actions">
-          <button class="share-btn" id="btn-share" type="button" hidden>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 11.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1 1M11.5 8.5a3.5 3.5 0 0 0-5 0L4 11a3.5 3.5 0 0 0 5 5l1-1"/></svg>
-            <span>Share link</span>
+          <button class="share-btn" id="btn-export" type="button">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m-4-4 4 4 4-4M4 14v2.5h12V14"/></svg>
+            <span>Export PDF</span>
           </button>
           <span class="sync-pill" id="sync-status" role="status" hidden></span>
         </div>
@@ -79,6 +84,20 @@
             </div>
           </div>
           <ul class="transfer-list" id="transfers"></ul>
+        </section>
+
+        <section class="card" aria-labelledby="h-spend">
+          <div class="card-head">
+            <div>
+              <h2 id="h-spend">Spending</h2>
+              <p class="card-sub" id="spend-sub">Monthly, by category</p>
+            </div>
+            <div class="segmented segmented-sm" role="radiogroup" aria-label="Chart scope">
+              <label><input type="radio" name="spend-scope" value="group" checked><span>This group</span></label>
+              <label><input type="radio" name="spend-scope" value="all"><span>All groups</span></label>
+            </div>
+          </div>
+          <div id="spend-chart" class="spend-chart"></div>
         </section>
 
         <section class="card" aria-labelledby="h-debts">
@@ -149,10 +168,23 @@
           <input id="ex-desc" placeholder="Dinner, cab, groceries…" maxlength="60">
         </label>
 
-        <label class="field">
-          <span>Paid by</span>
-          <select id="ex-payer"></select>
-        </label>
+        <div class="field">
+          <span>Category</span>
+          <div class="cat-chips" id="ex-cats" role="radiogroup" aria-label="Category"></div>
+          <input id="ex-cat-custom" list="custom-cats" placeholder="Name your category, e.g. Office" maxlength="24" aria-label="Custom category" hidden>
+          <datalist id="custom-cats"></datalist>
+        </div>
+
+        <div class="field-row">
+          <label class="field">
+            <span>Paid by</span>
+            <select id="ex-payer"></select>
+          </label>
+          <label class="field">
+            <span>Date</span>
+            <input id="ex-date" type="date" required>
+          </label>
+        </div>
 
         <div class="field">
           <span>Split</span>
@@ -236,10 +268,84 @@
     </div>
   </dialog>
 
+  <!-- Sign in / create account -->
+  <dialog class="sheet sheet-sm" id="auth-dialog" aria-labelledby="auth-title">
+    <form class="sheet-frame" id="auth-form" novalidate>
+      <header class="sheet-head">
+        <div>
+          <h3 id="auth-title">Welcome back</h3>
+          <p class="card-sub">A Splitter account keeps your groups private and in sync on every device.</p>
+        </div>
+        <button class="icon-btn" type="button" data-close aria-label="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+      <div class="sheet-body">
+        <div class="auth-tabs" role="tablist" aria-label="Account">
+          <button type="button" role="tab" data-auth-mode="signin" aria-selected="true">Sign in</button>
+          <button type="button" role="tab" data-auth-mode="signup" aria-selected="false">Create account</button>
+        </div>
+        <label class="field">
+          <span>Email</span>
+          <input id="auth-email" type="email" autocomplete="email" inputmode="email" maxlength="254" required>
+        </label>
+        <label class="field">
+          <span>Password <em>(at least 8 characters)</em></span>
+          <input id="auth-password" type="password" autocomplete="current-password" minlength="8" maxlength="72" required>
+        </label>
+        <label class="field" id="auth-confirm-field" hidden>
+          <span>Confirm password</span>
+          <input id="auth-confirm" type="password" autocomplete="new-password" maxlength="72">
+        </label>
+        <p class="form-error" id="auth-error" role="alert"></p>
+        <p class="auth-note">Splitter accounts are separate from any other app. Groups you made on this device move into your account when you sign in.</p>
+      </div>
+      <footer class="sheet-foot">
+        <button class="btn btn-ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn-primary" id="auth-submit" type="submit">Sign in</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Account -->
+  <dialog class="sheet sheet-sm" id="account-dialog" aria-labelledby="account-title">
+    <div class="sheet-frame">
+      <header class="sheet-head">
+        <div>
+          <h3 id="account-title">Your account</h3>
+          <p class="card-sub" id="account-email"></p>
+        </div>
+        <button class="icon-btn" type="button" data-close aria-label="Close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
+        </button>
+      </header>
+      <div class="sheet-body">
+        <p class="auth-note">Your groups are private: only this account can see them.</p>
+        <form class="pw-form" id="pw-form" novalidate hidden>
+          <label class="field"><span>Current password</span>
+            <input id="pw-old" type="password" autocomplete="current-password" maxlength="72"></label>
+          <label class="field"><span>New password <em>(at least 8 characters)</em></span>
+            <input id="pw-new" type="password" autocomplete="new-password" minlength="8" maxlength="72"></label>
+          <label class="field"><span>Confirm new password</span>
+            <input id="pw-confirm" type="password" autocomplete="new-password" maxlength="72"></label>
+          <p class="form-error" id="pw-error" role="alert"></p>
+          <button class="btn btn-primary" type="submit">Save new password</button>
+        </form>
+      </div>
+      <footer class="sheet-foot">
+        <button class="btn btn-ghost" id="btn-change-pw" type="button">Change password</button>
+        <button class="btn btn-soft" id="btn-signout" type="button">Sign out</button>
+      </footer>
+    </div>
+  </dialog>
+
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="config.js"></script>
   <script src="src/balances.js"></script>
+  <script src="src/categories.js"></script>
+  <script src="src/charts.js"></script>
+  <script src="src/statement.js"></script>
   <script src="src/remote.js"></script>
   <script src="app.js"></script>
 </body>

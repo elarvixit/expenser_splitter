@@ -1,17 +1,23 @@
 # Splitter — expense splitter
 
-A static web app for splitting group expenses to the paisa. No build step, no dependencies.
+A static web app for splitting group expenses to the paisa. No build step and no npm packages.
+The PDF library is loaded from cdnjs only when you export.
 
 ```
-index.html, styles.css, app.js   UI (orange/white)
+index.html, styles.css, app.js   UI (orange/white): state, sync, sign-in
 src/balances.js                  pure balance engine (browser global + CommonJS)
-src/remote.js                    tiny Supabase client (calls the three database functions)
+src/categories.js                categories, guessing from descriptions, monthly totals (pure)
+src/charts.js                    monthly spend chart (SVG), legend and table view
+src/statement.js                 PDF statement (jsPDF + autotable, pinned with SRI)
+src/remote.js                    tiny Supabase client (calls the splitter_* database functions)
 config.js                        public Supabase URL + anon key (empty = local-only mode)
-supabase/schema.sql              database tables + functions; paste into the Supabase SQL Editor
-tests/balances.test.js           unit tests (browser or Node)
+supabase/schema.sql              tables + functions; paste into the Supabase SQL Editor
+supabase/examples/*.sql          adding people / expenses by hand
+tests/*.test.js                  unit tests (browser or Node)
 tests/index.html                 browser test runner
 serve.ps1                        tiny local static server (PowerShell)
 scripts/write-config.mjs         Vercel build step: config.js from environment variables
+vercel.json                      runs that step on deploy
 ```
 
 ## Run
@@ -21,21 +27,36 @@ powershell -ExecutionPolicy Bypass -File serve.ps1
 ```
 
 Open http://localhost:5173 for the app and http://localhost:5173/tests/ for the tests.
-If Node is installed you can also run `node tests/balances.test.js`.
+With Node installed you can also run `node tests/balances.test.js` and `node tests/categories.test.js`.
 
-## Supabase (sync and share by link)
+## Features
 
-With no Supabase settings, Splitter keeps data only in the browser. To sync across devices
-and share groups:
+- **Groups:** create, switch, rename and delete them from the **Groups** button.
+- **Accounts:** email + password. Each account sees only its own groups, synced on every device.
+  Signed out, Splitter still works, but data stays in that browser.
+- **Categories:** Food, Travel, Stay, Shopping, Entertainment, Bills, Other, or your own. Older
+  expenses without one get a guess from their description ("Biryani" → Food).
+- **Spending chart:** monthly spend stacked by category, for the open group or all your groups,
+  with a legend, hover/focus tooltips and a table view. Expenses have a date, so past months can
+  be entered.
+- **PDF statement:** **Export PDF** downloads the open group's balances, settle-up plan,
+  spending by category and month, every expense and every payment. The PDF fonts have no ₹ sign,
+  so amounts there read "Rs.".
+
+## Supabase (accounts and sync)
+
+With no Supabase settings, Splitter keeps data only in the browser. To turn on accounts:
 
 1. In your Supabase project, open **SQL Editor → New query**, paste all of
-   `supabase/schema.sql` and click **Run**. It's safe to run again. It works in a new project
-   or in a shared team project, because everything it creates is prefixed:
-   - tables: `tharun_expense_splitter_groups`, `_members`, `_expenses`, `_expense_splits`, `_settlements`
-   - functions: `splitter_create_group`, `splitter_get_group`, `splitter_save_group`
+   `supabase/schema.sql` and click **Run**. It's safe to run again, and data is kept. It works in
+   a new project or in a shared team project, because everything it creates is prefixed:
+   - tables: `tharun_expense_splitter_users`, `_sessions`, `_groups`, `_members`, `_expenses`,
+     `_expense_splits`, `_settlements`
+   - functions: `splitter_*`
 
-   Nothing else in the project is changed. The top of the file has the commands to remove it.
-   Data saved by the first version (tables in the `splitter` schema) is copied over automatically.
+   It uses the `pgcrypto` extension, which Supabase provides, for password hashing. It does **not**
+   use Supabase Auth, so the project's other users and auth settings are untouched. The top of the
+   file has the commands to reset a forgotten password and to remove the app.
 2. Give the site the **Project URL** and the **publishable / anon key** (Project Settings → API).
    Use either of these:
    - **Vercel environment variables** (Project → Settings → Environment Variables):
@@ -44,31 +65,32 @@ and share groups:
      integration (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
      `…_PUBLISHABLE_KEY`) also work. Secret / service_role keys are refused.
    - **`config.js`**: put them in the file directly. This is also what local development uses.
-3. Open the site. Existing local groups upload automatically. **Share link** copies a URL like
-   `https://…/#g=<secret>`, and anyone who opens it can view and edit that group.
+3. Open the site and **Sign in → Create account**. Groups already on that device move into the
+   account. A group made before accounts existed can be claimed by opening its old `#g=` link
+   while signed in; after that it's private to that account.
 
-How it stays safe with a public key: the tables have Row Level Security on with no policies, and
-the anon role has no table privileges. The browser can only call the three `splitter_…`
-functions, and each one needs the group's secret token. Never use the `service_role` / secret key.
+How it stays safe with a public key:
+- The tables have Row Level Security on with no policies, and the anon role has no table privileges.
+- The browser can only call the `splitter_*` functions. Every group function takes a session token
+  and only touches groups owned by that account.
+- Passwords are stored as bcrypt hashes, and only a SHA-256 hash of each session token is stored.
+- Five wrong passwords lock an account for 15 minutes.
+- Never use the `service_role` / secret key.
 
-Edits apply instantly on the device, then sync. `splitter_save_group` checks a version number.
-If someone else saved in between, the app fetches the latest copy, replays your unsaved changes on
-top of it and saves again. Other people's changes are picked up every 15 seconds and whenever you
-return to the tab. Removing a group from the Groups list only removes it from that device.
-
-To delete a group from the database: `delete from tharun_expense_splitter_groups where token = '<token>';`
-(its members, expenses and payments are removed with it).
+Edits apply instantly on the device, then sync. `splitter_account_save_group` checks a version
+number. If another device saved in between, the app fetches the latest copy, replays your unsaved
+changes on top of it and saves again. Changes from your other devices are picked up every 15
+seconds and whenever you return to the tab. Deleting a group removes it from the account after
+the Undo window.
 
 ## Data model
 
-You can keep several groups (trips, flatmates, …). Use the **Groups** button in the header to
-create, switch, rename or delete them. Each group has its own members, expenses and payments.
-
-Only transactions are stored (in `localStorage` under `splitter:v2`, as
-`{ activeGroupId, groups: [...] }`). Balances are never stored; every render calls
+Only transactions are stored: in `localStorage` under `splitter:v2` on the device, and in the
+account when signed in. Balances are never stored; every render calls
 `calculateBalances({ members, expenses, settlements })` for the active group.
 
-- Expense: `{ id, paidBy, amount, splits: [{ memberId, amount }] }`, where all amounts are integer paise
+- Expense: `{ id, description, category?, paidBy, amount, splits: [{ memberId, amount }], createdAt }`,
+  where all amounts are integer paise
 - Settlement: `{ id, from, to, amount }`, meaning `from` handed `to` real money
 - Result: `{ balances: { [memberId]: paise }, debts: [{ from, to, amount }] }`
   - positive balance: the member should receive money; negative balance: the member owes money

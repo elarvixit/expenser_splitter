@@ -8,6 +8,7 @@ declare
   v_people text[] := array['Asha', 'Bilal', 'Chen'];  -- who shares it (equally)
   v_amount bigint := 45050;                     -- in PAISE: ₹450.50 = 45050
   v_desc   text   := 'Chai';                    -- what it was for
+  v_cat    text   := 'Food';                    -- Food, Travel, Stay, Shopping, Entertainment, Bills, Other, or your own
 
   g uuid; payer_id text; r record; i int := 0;
   n int := array_length(v_people, 1);
@@ -18,8 +19,8 @@ begin
   select id into payer_id from tharun_expense_splitter_members where group_id = g and name = v_payer;
   if payer_id is null then raise exception 'Payer "%" is not in this group', v_payer; end if;
 
-  insert into tharun_expense_splitter_expenses (group_id, id, description, paid_by, amount, split_mode, created_at)
-  values (g, eid, v_desc, payer_id, v_amount, 'equal', now());
+  insert into tharun_expense_splitter_expenses (group_id, id, description, category, paid_by, amount, split_mode, created_at)
+  values (g, eid, v_desc, nullif(trim(v_cat), ''), payer_id, v_amount, 'equal', now());
 
   -- equal shares; leftover paise go one each to the first people listed (same as the app)
   for r in select m.id from unnest(v_people) with ordinality as p(name, ord)
